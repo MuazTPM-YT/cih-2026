@@ -1,14 +1,117 @@
-<!-- PLACEHOLDER — `static/` is OWNED BY JIYA (jiya/dashboard) per tasks/CONTRACTS.md.
-     Twaha: do not build the dashboard here. This stub only gives ServeDir something to
-     serve so the gateway runs. Jiya replaces it with index.html + app.css + app.js. -->
 <!doctype html>
-<meta charset="utf-8">
-<title>Telemedicine Gateway — dashboard placeholder</title>
-<main style="font-family: system-ui; max-width: 40rem; margin: 4rem auto; line-height: 1.5">
-  <h1>Gateway is running</h1>
-  <p>This is a placeholder page. The real dashboard is Jiya's work (<code>jiya/dashboard</code>).</p>
-  <p>APIs (serving mock fixtures in scaffold):
-    <a href="/api/observations">/api/observations</a> ·
-    <a href="/api/queue">/api/queue</a>
-  </p>
-</main>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1280">
+  <title>TGW Clinical Dashboard — Telemedicine Gateway</title>
+  <meta name="description" content="Low-bandwidth telemedicine gateway dashboard showing real-time clinical observations, transfer state, and connection status.">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+  <!-- Top bar -->
+  <header id="header" role="banner">
+    <div class="header-left">
+      <h1>
+        <span class="header-icon" aria-hidden="true">⚕</span>
+        TGW Clinical Dashboard
+      </h1>
+    </div>
+    <div class="header-right">
+      <span id="connection-status" class="status-badge status-ok" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span class="status-text">Connected</span>
+      </span>
+      <time id="last-updated" class="last-updated" datetime="">—</time>
+    </div>
+  </header>
+
+  <!-- Reconnecting banner -->
+  <div id="reconnect-banner" class="reconnect-banner" role="alert" aria-live="assertive" hidden>
+    <span class="reconnect-icon" aria-hidden="true">⟳</span>
+    Reconnecting… showing last known data
+  </div>
+
+  <!-- Main three-panel layout -->
+  <main id="main" class="panels" role="main">
+
+    <!-- Panel 1: Live Observations Feed -->
+    <section id="observations-panel" class="panel panel-observations" aria-labelledby="obs-heading">
+      <h2 id="obs-heading" class="panel-heading">
+        <span class="panel-icon" aria-hidden="true">📋</span>
+        Live Observations
+        <span id="obs-count" class="badge">0</span>
+      </h2>
+      <div id="observations-feed" class="feed" role="log" aria-live="polite" aria-relevant="additions">
+        <p class="feed-empty">Waiting for clinical data…</p>
+      </div>
+    </section>
+
+    <!-- Panel 2: Transfer State -->
+    <section id="transfer-panel" class="panel panel-transfers" aria-labelledby="xfer-heading">
+      <h2 id="xfer-heading" class="panel-heading">
+        <span class="panel-icon" aria-hidden="true">📡</span>
+        Transfer Queue
+        <span id="xfer-count" class="badge">0</span>
+      </h2>
+      <div id="transfer-feed" class="feed" role="log" aria-live="polite" aria-relevant="additions">
+        <p class="feed-empty">No transfers yet…</p>
+      </div>
+    </section>
+
+    <!-- Panel 3: Connection / Status Context -->
+    <section id="status-panel" class="panel panel-status" aria-labelledby="status-heading">
+      <h2 id="status-heading" class="panel-heading">
+        <span class="panel-icon" aria-hidden="true">🔗</span>
+        Connection
+      </h2>
+      <div class="status-grid">
+        <div class="status-card" id="status-mode">
+          <span class="status-card-label">Mode</span>
+          <span class="status-card-value" id="mode-value">Mock</span>
+        </div>
+        <div class="status-card" id="status-poll">
+          <span class="status-card-label">Poll Interval</span>
+          <span class="status-card-value">2 s</span>
+        </div>
+        <div class="status-card" id="status-polls-ok">
+          <span class="status-card-label">Successful Polls</span>
+          <span class="status-card-value" id="polls-ok-value">0</span>
+        </div>
+        <div class="status-card" id="status-polls-fail">
+          <span class="status-card-label">Failed Polls</span>
+          <span class="status-card-value" id="polls-fail-value">0</span>
+        </div>
+        <div class="status-card" id="status-endpoint">
+          <span class="status-card-label">API Endpoint</span>
+          <span class="status-card-value status-card-value-sm" id="endpoint-value">—</span>
+        </div>
+        <div class="status-card" id="status-uptime">
+          <span class="status-card-label">Dashboard Uptime</span>
+          <span class="status-card-value" id="uptime-value">0 s</span>
+        </div>
+      </div>
+      <div class="status-legend">
+        <h3 class="legend-title">Transfer States</h3>
+        <div class="legend-items">
+          <span class="legend-item">
+            <span class="legend-dot state-receiving" aria-hidden="true"></span>
+            Receiving
+          </span>
+          <span class="legend-item">
+            <span class="legend-dot state-complete" aria-hidden="true"></span>
+            Complete
+          </span>
+          <span class="legend-item">
+            <span class="legend-dot state-receipt-sent" aria-hidden="true"></span>
+            Receipt Sent
+          </span>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
