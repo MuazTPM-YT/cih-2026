@@ -370,7 +370,10 @@ fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
     for (id, received_at, kind) in rows {
         match kind {
             "vitals" => {
-                for fhir_json in store.get_observations(id)?.unwrap_or_default() {
+                let observations = store.get_observations(id)?.ok_or_else(|| {
+                    anyhow::anyhow!("delivered vitals bundle {id} is missing FHIR data")
+                })?;
+                for fhir_json in observations {
                     let patient_id = fhir_json
                         .get("subject")
                         .and_then(|subject| subject.get("reference"))
@@ -387,13 +390,18 @@ fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
                     }));
                 }
             }
-            "image" => items.push(json!({
-                "bundle_id": id.to_string(),
-                "received_at": received_at,
-                "patient_id": store.get_image_patient(id)?.unwrap_or_default(),
-                "kind": "image",
-                "image_url": format!("/api/images/{}", id),
-            })),
+            "image" => {
+                let patient_id = store.get_image_patient(id)?.ok_or_else(|| {
+                    anyhow::anyhow!("delivered image bundle {id} is missing patient data")
+                })?;
+                items.push(json!({
+                    "bundle_id": id.to_string(),
+                    "received_at": received_at,
+                    "patient_id": patient_id,
+                    "kind": "image",
+                    "image_url": format!("/api/images/{}", id),
+                }));
+            }
             _ => {}
         }
     }
