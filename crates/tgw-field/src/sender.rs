@@ -1,5 +1,6 @@
 //! The delivery loop (muaz.md H6–10): burst → listen → NACK repair / receipt / timeout
-//! re-burst with backoff → `delivered` or `stuck`. Nothing is ever silently dropped.
+//! re-burst with linear backoff (`retry_backoff_ms × attempt`) → `delivered` or `stuck`.
+//! Nothing is ever silently dropped.
 //!
 //! ```text
 //! queued(redb) → sending(burst @ overhead×) → await(receipt | nack, timeout T)
@@ -37,7 +38,11 @@ pub enum Outcome {
 /// Deliver one bundle over `socket` (already `connect`ed to the gateway).
 ///
 /// * Sends the initial burst, then serves NACKs and waits for the receipt.
-/// * On silence past `retry_backoff_ms × attempt`, re-bursts fresh repair symbols.
+/// * On silence past the attempt deadline, re-bursts fresh repair symbols. The deadline
+///   grows **linearly** — `retry_backoff_ms × attempt` (`3s, 6s, 9s, …`), not
+///   exponentially — a deliberately gentle schedule: on a delay-tolerant link we prefer
+///   steady, bandwidth-frugal retries over aggressive exponential fallback that would
+///   idle the link for minutes after a burst.
 /// * `should_preempt` is polled at each timeout; returning `true` pauses this transfer
 ///   (the caller re-queues it) so vitals can preempt an in-flight image.
 ///
