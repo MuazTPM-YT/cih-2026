@@ -504,12 +504,18 @@ mod tests {
         let key = Key::generate();
         let subkey = data_subkey(&key);
         let dgram = build_data_frame(Uuid::new_v4(), &[7u8; OTI_LEN], &[1, 2, 3, 4, 5], &subkey);
-        assert!(authenticate_data(&dgram, &key), "own-key DATA authenticates");
+        assert!(
+            authenticate_data(&dgram, &key),
+            "own-key DATA authenticates"
+        );
         assert!(
             !authenticate_data(&dgram, &Key::generate()),
             "wrong key rejected"
         );
-        assert!(!authenticate_data(b"\x01\x01junk", &key), "garbage rejected");
+        assert!(
+            !authenticate_data(b"\x01\x01junk", &key),
+            "garbage rejected"
+        );
         assert!(!authenticate_data(&[], &key), "empty rejected");
     }
 

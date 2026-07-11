@@ -45,7 +45,11 @@ impl Default for PairLimits {
 }
 
 /// Serve the pairing handshake on `bind_addr`; return the derived key on first confirmed pair.
-pub async fn run_pair_responder(bind_addr: SocketAddr, code: &str, limits: PairLimits) -> Result<Key> {
+pub async fn run_pair_responder(
+    bind_addr: SocketAddr,
+    code: &str,
+    limits: PairLimits,
+) -> Result<Key> {
     let sock = UdpSocket::bind(bind_addr)
         .await
         .with_context(|| format!("pair responder: bind {bind_addr}"))?;
@@ -144,8 +148,9 @@ mod tests {
         let addr = probe.local_addr().unwrap();
         drop(probe);
 
-        let server =
-            tokio::spawn(async move { run_pair_responder(addr, "pair-xyz", PairLimits::default()).await });
+        let server = tokio::spawn(async move {
+            run_pair_responder(addr, "pair-xyz", PairLimits::default()).await
+        });
         // Give the responder a moment to bind.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -164,13 +169,21 @@ mod tests {
         let PairFrame::Resp { cookie, msg, .. } = decode_pair(&buf[..n]).unwrap() else {
             panic!("expected resp challenge")
         };
-        assert!(msg.is_empty() && !cookie.is_empty(), "first reply is a cookie challenge");
+        assert!(
+            msg.is_empty() && !cookie.is_empty(),
+            "first reply is a cookie challenge"
+        );
         // Echo the cookie → real RESP.
         cli.send(&encode_pair(&PairFrame::Init { cookie, msg: msg_a }))
             .await
             .unwrap();
         let n = cli.recv(&mut buf).await.unwrap();
-        let PairFrame::Resp { msg: msg_b, confirm, .. } = decode_pair(&buf[..n]).unwrap() else {
+        let PairFrame::Resp {
+            msg: msg_b,
+            confirm,
+            ..
+        } = decode_pair(&buf[..n]).unwrap()
+        else {
             panic!("expected real resp")
         };
         let session = initiator.finish(&msg_b).unwrap();

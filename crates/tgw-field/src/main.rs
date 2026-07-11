@@ -278,7 +278,9 @@ fn parse_pairing_string(s: &str) -> Result<(String, String)> {
         .strip_prefix("tgw1:")
         .context("pairing string must start with `tgw1:`")?;
     // Format is exactly `tgw1:HOST:PORT:CODE`; the code follows the last ':' after the port.
-    let (addr, code) = rest.rsplit_once(':').context("pairing string missing code")?;
+    let (addr, code) = rest
+        .rsplit_once(':')
+        .context("pairing string missing code")?;
     if addr.parse::<SocketAddr>().is_err() {
         bail!("pairing string address {addr:?} is not host:port");
     }

@@ -388,7 +388,10 @@ mod tests {
         let b: SocketAddr = "203.0.113.6:5000".parse().expect("addr");
         let cookie = key.mint(&a, 100);
         assert!(key.verify(&a, 100, &cookie), "same addr+epoch verifies");
-        assert!(key.verify(&a, 101, &cookie), "previous epoch still accepted");
+        assert!(
+            key.verify(&a, 101, &cookie),
+            "previous epoch still accepted"
+        );
         assert!(!key.verify(&b, 100, &cookie), "different source rejected");
         assert!(!key.verify(&a, 102, &cookie), "too-old epoch rejected");
         assert!(!key.verify(&a, 100, &[0u8; 16]), "forged cookie rejected");

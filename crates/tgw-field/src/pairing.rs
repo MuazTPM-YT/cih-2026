@@ -13,7 +13,11 @@ use tokio::time::{Instant, timeout};
 const RETRANSMIT: Duration = Duration::from_millis(500);
 
 /// Pair with the hospital at `hospital_addr` using the human `code`; return the session key.
-pub async fn pair_with_hospital(hospital_addr: &str, code: &str, deadline: Duration) -> Result<Key> {
+pub async fn pair_with_hospital(
+    hospital_addr: &str,
+    code: &str,
+    deadline: Duration,
+) -> Result<Key> {
     let sock = UdpSocket::bind("0.0.0.0:0").await.context("pair: bind")?;
     sock.connect(hospital_addr)
         .await
@@ -33,7 +37,9 @@ pub async fn pair_with_hospital(hospital_addr: &str, code: &str, deadline: Durat
             cookie: cookie.clone(),
             msg: msg_a.clone(),
         };
-        sock.send(&encode_pair(&init)).await.context("pair: send init")?;
+        sock.send(&encode_pair(&init))
+            .await
+            .context("pair: send init")?;
 
         match timeout(RETRANSMIT, sock.recv(&mut buf)).await {
             Err(_) => continue, // silence → retransmit
@@ -97,7 +103,9 @@ mod tests {
     #[tokio::test]
     async fn pairs_against_a_minimal_responder() {
         // Minimal cookieless responder: runs SPAKE2 B, confirms, verifies the field's confirm.
-        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = sock.local_addr().expect("addr").to_string();
         let server = tokio::spawn(async move {
             let mut buf = vec![0u8; 2048];
@@ -112,12 +120,17 @@ mod tests {
                 msg: msg_b,
                 confirm: session.responder_confirm().to_vec(),
             };
-            sock.send_to(&encode_pair(&resp), from).await.expect("send resp");
+            sock.send_to(&encode_pair(&resp), from)
+                .await
+                .expect("send resp");
             let (n, _) = sock.recv_from(&mut buf).await.expect("recv confirm");
             let PairFrame::Confirm { confirm } = decode_pair(&buf[..n]).expect("confirm") else {
                 panic!("expected confirm")
             };
-            assert!(session.verify_initiator_confirm(&confirm), "field confirm verifies");
+            assert!(
+                session.verify_initiator_confirm(&confirm),
+                "field confirm verifies"
+            );
         });
 
         let key = pair_with_hospital(&addr, "code-123", Duration::from_secs(5))

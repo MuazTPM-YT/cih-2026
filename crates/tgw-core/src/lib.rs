@@ -45,11 +45,11 @@ pub use envelope::{open_envelope, seal_bundle};
 pub use error::CoreError;
 pub use fec::{Absorb, BundleReceiver, BundleSender, encode_bundle};
 pub use key::{KEY_LEN, Key};
+pub use model::{Bundle, BundlePayload, Component, Datagram, Measure, Priority, VitalsObservation};
 pub use pake::{
     CookieKey, PairFrame, PairInitiator, PairResponder, PairSession, decode_pair, encode_pair,
     start_initiator, start_responder,
 };
-pub use model::{Bundle, BundlePayload, Component, Datagram, Measure, Priority, VitalsObservation};
 pub use wire::{
     FRAME_DATA, FRAME_NACK, FRAME_RECEIPT, Frame, NackFrame, WIRE_VERSION, authenticate_data,
     build_receipt, encode_nack, parse_frame, verify_receipt,

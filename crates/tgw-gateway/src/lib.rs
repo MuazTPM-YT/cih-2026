@@ -69,7 +69,9 @@ pub mod session {
     /// Load the key, or `Ok(None)` if absent.
     pub fn load(path: &Path) -> Result<Option<Key>> {
         match std::fs::read_to_string(path) {
-            Ok(hex) => Ok(Some(Key::from_hex(hex.trim()).context("gateway session key")?)),
+            Ok(hex) => Ok(Some(
+                Key::from_hex(hex.trim()).context("gateway session key")?,
+            )),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
         }
@@ -86,10 +88,7 @@ const MAX_INFLIGHT_BUNDLES: usize = 256;
 
 /// Choose the oldest in-flight bundle to evict when the receiver map is at capacity (LRU by
 /// first-seen). Returns `None` when under capacity.
-fn bundle_to_evict(
-    first_seen: &HashMap<Uuid, std::time::Instant>,
-    cap: usize,
-) -> Option<Uuid> {
+fn bundle_to_evict(first_seen: &HashMap<Uuid, std::time::Instant>, cap: usize) -> Option<Uuid> {
     if first_seen.len() < cap {
         return None;
     }
@@ -627,6 +626,10 @@ mod eviction_tests {
         m.insert(oldest, t0);
         m.insert(Uuid::new_v4(), t0 + std::time::Duration::from_millis(5));
         assert_eq!(bundle_to_evict(&m, 3), None, "under cap: nothing evicted");
-        assert_eq!(bundle_to_evict(&m, 2), Some(oldest), "at cap: oldest chosen");
+        assert_eq!(
+            bundle_to_evict(&m, 2),
+            Some(oldest),
+            "at cap: oldest chosen"
+        );
     }
 }

@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 /// Grab an ephemeral loopback UDP port, then release it so a server can rebind it.
 async fn free_addr() -> SocketAddr {
-    let sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind ephemeral");
+    let sock = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral");
     sock.local_addr().expect("local addr")
 }
 
@@ -51,13 +53,10 @@ async fn pair_at(addr: SocketAddr) -> (tgw_core::Key, tgw_core::Key) {
         tokio::spawn(async move { run_pair_responder(addr, code, Default::default()).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let field_key = tgw_field::pairing::pair_with_hospital(
-        &addr.to_string(),
-        code,
-        Duration::from_secs(10),
-    )
-    .await
-    .expect("field pairs");
+    let field_key =
+        tgw_field::pairing::pair_with_hospital(&addr.to_string(), code, Duration::from_secs(10))
+            .await
+            .expect("field pairs");
     let gw_key = responder.await.expect("join").expect("gateway pairs");
     assert_eq!(
         field_key.to_hex(),
@@ -73,8 +72,7 @@ async fn pair_then_deliver_end_to_end() {
     let (field_key, gw_key) = pair_at(gw_addr).await;
 
     // Start the real gateway listener on the SAME addr under the derived key.
-    let store_path =
-        std::env::temp_dir().join(format!("tgw-paired-{}.redb", std::process::id()));
+    let store_path = std::env::temp_dir().join(format!("tgw-paired-{}.redb", std::process::id()));
     let _ = std::fs::remove_file(&store_path);
     let store = Arc::new(Store::open(&store_path).expect("open store"));
     let gw_store = Arc::clone(&store);
@@ -99,10 +97,21 @@ async fn pair_then_deliver_end_to_end() {
     let mut pacer = Pacer::new(10_000_000, 64 * 1024);
     let bundle = vitals_bundle(1);
     let mut sender = BundleSender::new(&bundle, &field_key, &fec).expect("sender");
-    let outcome = deliver(&field_sock, &mut sender, &mut pacer, &field_key, &retry, || false)
-        .await
-        .expect("deliver");
-    assert_eq!(outcome, Outcome::Delivered, "bundle delivers under the derived key");
+    let outcome = deliver(
+        &field_sock,
+        &mut sender,
+        &mut pacer,
+        &field_key,
+        &retry,
+        || false,
+    )
+    .await
+    .expect("deliver");
+    assert_eq!(
+        outcome,
+        Outcome::Delivered,
+        "bundle delivers under the derived key"
+    );
     assert!(
         store.is_delivered(bundle.id).expect("is_delivered"),
         "the bundle must be persisted at the gateway"
@@ -137,7 +146,10 @@ async fn pair_then_deliver_through_25pct_loss() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let field_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind field");
-    field_sock.connect(proxy_listen).await.expect("connect proxy");
+    field_sock
+        .connect(proxy_listen)
+        .await
+        .expect("connect proxy");
     let fec = FecConfig {
         symbol_size: 1100,
         overhead_factor: 1.4,
@@ -152,7 +164,14 @@ async fn pair_then_deliver_through_25pct_loss() {
     let bundle = vitals_bundle(2);
     let mut sender = BundleSender::new(&bundle, &field_key, &fec).expect("sender");
 
-    let run = deliver(&field_sock, &mut sender, &mut pacer, &field_key, &retry, || false);
+    let run = deliver(
+        &field_sock,
+        &mut sender,
+        &mut pacer,
+        &field_key,
+        &retry,
+        || false,
+    );
     let outcome = tokio::time::timeout(Duration::from_secs(90), run)
         .await
         .expect("delivery within time bound")
