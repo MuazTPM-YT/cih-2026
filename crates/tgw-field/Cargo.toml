@@ -1,5 +1,8 @@
-# PLACEHOLDER — owned by Muaz (muaz/core) per tasks/CONTRACTS.md.
-# Minimal stub so the workspace builds; Muaz implements the real field client.
+# tgw-field — OWNER: Muaz (muaz/core) per tasks/CONTRACTS.md.
+# Field client binary: capture CLI, redb store-and-forward queue, token-bucket pacer,
+# UDP sender loop with NACK repair, delivery-receipt handling, `status` view.
+# The lib target exists so Twaha's workspace integration test can drive the sender
+# in-process (tests/lossy_delivery.rs).
 [package]
 name = "tgw-field"
 version = "0.1.0"
@@ -10,3 +13,17 @@ license.workspace = true
 [dependencies]
 tgw-core.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+redb.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+uuid.workspace = true
+time.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+# test-util enables tokio's paused clock for the deterministic pacer timing test.
+tokio = { workspace = true, features = ["test-util"] }
