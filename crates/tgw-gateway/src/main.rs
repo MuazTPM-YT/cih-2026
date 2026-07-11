@@ -40,7 +40,12 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .context("parse gateway HTTP address")?;
     let db = database_path(&cli.config)?;
-    let key = tgw_core::Key::from_file(&config.crypto.key_file).context("load gateway key")?;
+    let key_path = config
+        .crypto
+        .key_file
+        .clone()
+        .context("no [crypto].key_file set (run `tgw-gateway pair` or configure a key file)")?;
+    let key = tgw_core::Key::from_file(&key_path).context("load gateway key")?;
 
     let store = Arc::new(tgw_gateway::Store::open(&db).context("open gateway store")?);
 

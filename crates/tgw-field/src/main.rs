@@ -253,7 +253,12 @@ fn queue_path() -> PathBuf {
 fn load_config_and_key(config_path: &Path) -> Result<(Config, Key)> {
     let config = Config::load(config_path)
         .with_context(|| format!("loading config {}", config_path.display()))?;
-    let key = Key::from_file(&config.crypto.key_file)
+    let key_path = config
+        .crypto
+        .key_file
+        .clone()
+        .context("no [crypto].key_file; generate one with `tgw-field keygen` or run `tgw-field pair`")?;
+    let key = Key::from_file(&key_path)
         .context("loading PSK (generate one with `tgw-field keygen`)")?;
     Ok((config, key))
 }
