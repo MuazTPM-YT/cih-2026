@@ -288,9 +288,14 @@ fn on_complete(bundle: &Bundle) {
                     loinc = %obs.loinc,
                     "gateway: decoded vitals observation (no PHI values logged)"
                 );
-                let fhir = tgw_fhir::to_fhir_json(obs);
-                let pretty = serde_json::to_string_pretty(&fhir).unwrap_or_default();
-                println!("{pretty}");
+                // PHI: the decoded Observation carries patient values. Never print it by
+                // default (stdout is captured by journald/containers — that would leak PHI,
+                // contradicting the no-PHI-in-logs posture). Opt in only for local demos.
+                if std::env::var_os("TGW_PRINT_FHIR").is_some() {
+                    let fhir = tgw_fhir::to_fhir_json(obs);
+                    let pretty = serde_json::to_string_pretty(&fhir).unwrap_or_default();
+                    println!("{pretty}");
+                }
             }
         }
         BundlePayload::Image { mime, data, .. } => {
