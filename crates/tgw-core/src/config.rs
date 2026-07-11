@@ -64,6 +64,39 @@ pub struct MediaConfig {
     pub image_max_bytes: usize,
 }
 
+/// `[relay]` — local peer-relay fallback (Fix 2). Optional; defaults to disabled so existing
+/// Contract-4 configs parse unchanged.
+///
+/// When enabled, a field device announces its presence on the local subnet and, if its direct
+/// gateway hop yields no receipt within the retry budget, hands its still-sealed bundle to a
+/// discovered peer to forward. The relay peer only ever holds ciphertext — see `relay.rs`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RelayConfig {
+    /// Master switch for the peer-relay fallback.
+    pub enabled: bool,
+    /// UDP broadcast address peers announce presence on, e.g. `"255.255.255.255:47555"`.
+    pub discovery_addr: String,
+    /// Local UDP bind where this device accepts relay requests from peers.
+    pub relay_listen_addr: String,
+    /// How often to broadcast a presence announcement (milliseconds).
+    pub announce_interval_ms: u64,
+    /// How long a discovered peer stays usable without a fresh announcement (milliseconds).
+    pub peer_ttl_ms: u64,
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        RelayConfig {
+            enabled: false,
+            discovery_addr: "255.255.255.255:47555".to_string(),
+            relay_listen_addr: "0.0.0.0:47556".to_string(),
+            announce_interval_ms: 2000,
+            peer_ttl_ms: 8000,
+        }
+    }
+}
+
 /// Full Contract 4 configuration, one struct for both binaries.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -77,6 +110,9 @@ pub struct Config {
     pub crypto: CryptoConfig,
     /// Media limits.
     pub media: MediaConfig,
+    /// Local peer-relay fallback (Fix 2). Absent section ⇒ disabled defaults.
+    #[serde(default)]
+    pub relay: RelayConfig,
 }
 
 impl Config {
@@ -223,6 +259,40 @@ mod tests {
                 panic!("config/{sample} must parse per Contract 4: {e}");
             }
         }
+    }
+
+    #[test]
+    fn relay_defaults_apply_when_section_is_absent() {
+        // Existing Contract-4 configs have no [relay] section; it must default to disabled
+        // without breaking the parse (serde defaults).
+        let config = match Config::from_toml_str(SAMPLE) {
+            Ok(c) => c,
+            Err(e) => panic!("config without [relay] must still parse: {e}"),
+        };
+        assert!(
+            !config.relay.enabled,
+            "relay is off unless explicitly enabled"
+        );
+        assert!(
+            !config.relay.discovery_addr.is_empty(),
+            "a default discovery address must be present"
+        );
+    }
+
+    #[test]
+    fn relay_section_parses_when_present() {
+        let with_relay = format!(
+            "{SAMPLE}\n[relay]\nenabled = true\ndiscovery_addr = \"255.255.255.255:47555\"\n\
+             relay_listen_addr = \"0.0.0.0:47556\"\nannounce_interval_ms = 1500\npeer_ttl_ms = 6000\n"
+        );
+        let config = match Config::from_toml_str(&with_relay) {
+            Ok(c) => c,
+            Err(e) => panic!("[relay] section must parse: {e}"),
+        };
+        assert!(config.relay.enabled);
+        assert_eq!(config.relay.discovery_addr, "255.255.255.255:47555");
+        assert_eq!(config.relay.announce_interval_ms, 1500);
+        assert_eq!(config.relay.peer_ttl_ms, 6000);
     }
 
     #[test]

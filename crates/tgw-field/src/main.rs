@@ -4,21 +4,29 @@
 //! Everything a field worker sees flows through here; the certainty story
 //! (`queued → sending → delivered ✓`, or a loud `STUCK`) is printed, never hidden.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use tgw_core::{Bundle, BundleSender, Config, Key};
+use tgw_core::{Bundle, BundleSender, Config, FecConfig, Key};
 use tokio::net::UdpSocket;
 
+use tgw_field::discovery::{PeerTable, run_discovery};
 use tgw_field::pacer::Pacer;
 use tgw_field::queue::{BundleState, Queue, QueuedBundle};
+use tgw_field::relay::{relay_failover, run_relay_service};
 use tgw_field::sender::{Outcome, deliver};
 use tgw_field::vitals::{VitalsInput, build_observations};
 
 /// Instantaneous burst allowance for the pacer (matches the demo's `tbf burst 8kb`).
 const PACER_BURST_BYTES: usize = 8 * 1024;
+
+/// FEC overhead used when re-framing a bundle for the peer relay: higher than the direct
+/// default so the relayed burst decodes at the gateway in one shot (the relay peer forwards
+/// opaque bytes and cannot mint repair symbols).
+const RELAY_OVERHEAD_FACTOR: f32 = 2.0;
 
 #[derive(Parser)]
 #[command(
@@ -217,7 +225,9 @@ async fn enqueue_and_drain(config_path: &Path, bundle: Bundle) -> Result<()> {
     queue.enqueue(&record)?;
     println!("bundle {}  [{}]  queued", short_id(bundle.id), record.kind);
 
-    drain_queue(&config, &key, &queue).await?;
+    // One-shot send uses the direct link only (no time to discover peers); the daemon runs
+    // discovery and enables relay failover.
+    drain_queue(&config, &key, &queue, None).await?;
 
     match queue.get(bundle.id)?.map(|r| r.state) {
         Some(BundleState::Delivered) => Ok(()),
@@ -230,13 +240,19 @@ async fn enqueue_and_drain(config_path: &Path, bundle: Bundle) -> Result<()> {
     }
 }
 
-/// One pass over the queue: send everything sendable, vitals first.
-async fn drain_queue(config: &Config, key: &Key, queue: &Queue) -> Result<()> {
+/// One pass over the queue: send everything sendable, vitals first. `peers`, when present,
+/// enables peer-relay failover for bundles the direct link cannot deliver.
+async fn drain_queue(
+    config: &Config,
+    key: &Key,
+    queue: &Queue,
+    peers: Option<&PeerTable>,
+) -> Result<()> {
     let socket = open_socket(config).await?;
     let mut pacer = Pacer::new(config.link.bandwidth_bps, PACER_BURST_BYTES);
 
     while let Some(record) = queue.next_sendable()? {
-        deliver_one(config, key, queue, &socket, &mut pacer, &record).await?;
+        deliver_one(config, key, queue, &socket, &mut pacer, &record, peers).await?;
     }
     Ok(())
 }
@@ -259,9 +275,11 @@ async fn deliver_one(
     socket: &UdpSocket,
     pacer: &mut Pacer,
     record: &QueuedBundle,
+    peers: Option<&PeerTable>,
 ) -> Result<()> {
-    let mut fec_sender = BundleSender::from_envelope(record.id, &record.envelope, &config.fec())
-        .context("rebuilding FEC sender from stored envelope")?;
+    let mut fec_sender =
+        BundleSender::from_envelope(record.id, &record.envelope, key, &config.fec())
+            .context("rebuilding FEC sender from stored envelope")?;
 
     queue.set_state(record.id, BundleState::Sending)?;
     println!(
@@ -296,6 +314,10 @@ async fn deliver_one(
             );
         }
         Outcome::Stuck => {
+            // Fix 2: before flagging stuck, try to reach the gateway through a discovered peer.
+            if try_relay_failover(config, key, queue, record, peers).await? {
+                return Ok(());
+            }
             queue.bump_retries(record.id)?;
             queue.set_state(record.id, BundleState::Stuck)?;
             println!(
@@ -317,26 +339,132 @@ async fn deliver_one(
     Ok(())
 }
 
+/// Attempt peer-relay failover for a bundle the direct link could not deliver. Returns `true`
+/// if a discovered peer relayed it to a verified receipt (queue marked delivered), `false` if
+/// relay is disabled, no peers are known, or none succeeded (the caller then flags it stuck).
+async fn try_relay_failover(
+    config: &Config,
+    key: &Key,
+    queue: &Queue,
+    record: &QueuedBundle,
+    peers: Option<&PeerTable>,
+) -> Result<bool> {
+    let Some(table) = peers else {
+        return Ok(false);
+    };
+    let candidates: Vec<SocketAddr> = table
+        .active(Instant::now())
+        .into_iter()
+        .filter_map(|addr| addr.parse().ok())
+        .collect();
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+
+    // Re-frame the still-sealed envelope into an over-provisioned burst the relay can forward
+    // opaquely (it never decrypts; it only holds ciphertext).
+    let relay_cfg = FecConfig {
+        symbol_size: config.link.symbol_size,
+        overhead_factor: RELAY_OVERHEAD_FACTOR,
+    };
+    let datagrams = BundleSender::from_envelope(record.id, &record.envelope, key, &relay_cfg)
+        .context("re-framing bundle for relay")?
+        .initial_burst();
+    let budget = Duration::from_millis(config.retry.retry_backoff_ms.saturating_mul(4).max(1000));
+
+    println!(
+        "bundle {}  [{}]  direct link stuck — trying {} peer relay(s)…",
+        short_id(record.id),
+        record.kind,
+        candidates.len()
+    );
+    if relay_failover(&candidates, record.id, &datagrams, key, budget).await? == Outcome::Delivered
+    {
+        queue.set_state(record.id, BundleState::Delivered)?;
+        println!(
+            "bundle {}  [{}]  delivered ✓  via peer relay",
+            short_id(record.id),
+            record.kind
+        );
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn daemon(config_path: &Path) -> Result<()> {
     let (config, key) = load_config_and_key(config_path)?;
     let queue = Queue::open(&queue_path())?; // open() re-queues interrupted transfers
     let socket = open_socket(&config).await?;
     let mut pacer = Pacer::new(config.link.bandwidth_bps, PACER_BURST_BYTES);
 
+    // Fix 2: when the relay fallback is enabled, announce presence, learn peers, and accept
+    // relay requests from other devices — all in the background alongside the drain loop.
+    let peers = start_relay_services(&config);
+
     tracing::info!(
         gateway = %config.net.gateway_addr,
         bandwidth_bps = config.link.bandwidth_bps,
+        relay = config.relay.enabled,
         "field daemon up — draining queue continuously"
     );
     loop {
         match queue.next_sendable()? {
             Some(record) => {
                 // A stuck bundle re-enters via manual requeue; retries here are per-pass.
-                deliver_one(&config, &key, &queue, &socket, &mut pacer, &record).await?;
+                deliver_one(
+                    &config,
+                    &key,
+                    &queue,
+                    &socket,
+                    &mut pacer,
+                    &record,
+                    peers.as_ref(),
+                )
+                .await?;
             }
             None => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
+}
+
+/// Launch peer discovery and the relay service if `[relay].enabled`, returning the shared
+/// [`PeerTable`] the drain loop consults for failover. Returns `None` when relay is disabled.
+///
+/// Deployment note: `relay_listen_addr` is announced verbatim, so in production it must be the
+/// device's reachable LAN address (not `0.0.0.0`); binding stays on the configured address.
+fn start_relay_services(config: &Config) -> Option<PeerTable> {
+    if !config.relay.enabled {
+        return None;
+    }
+    let table = PeerTable::new(Duration::from_millis(config.relay.peer_ttl_ms));
+
+    let discovery_addr = config.relay.discovery_addr.clone();
+    let own_relay_addr = config.relay.relay_listen_addr.clone();
+    let interval = Duration::from_millis(config.relay.announce_interval_ms.max(1));
+    let discovery_table = table.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            run_discovery(&discovery_addr, &own_relay_addr, interval, discovery_table).await
+        {
+            tracing::warn!(error = %e, "peer discovery stopped");
+        }
+    });
+
+    if let Ok(gateway_addr) = config.net.gateway_addr.parse::<SocketAddr>() {
+        let relay_listen = config.relay.relay_listen_addr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_relay_service(&relay_listen, gateway_addr).await {
+                tracing::warn!(error = %e, "relay service stopped");
+            }
+        });
+    } else {
+        tracing::warn!(
+            gateway = %config.net.gateway_addr,
+            "relay service not started: gateway_addr is not a socket address"
+        );
+    }
+
+    Some(table)
 }
 
 async fn status(config_path: &Path, watch: bool) -> Result<()> {

@@ -1040,6 +1040,7 @@ dependencies = [
  "rand",
  "raptorq",
  "serde",
+ "sha2",
  "thiserror",
  "time",
  "toml",

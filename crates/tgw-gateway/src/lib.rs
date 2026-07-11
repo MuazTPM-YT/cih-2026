@@ -20,8 +20,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tgw_core::{
-    Absorb, Bundle, BundlePayload, BundleReceiver, Frame, Key, build_receipt, encode_nack,
-    parse_frame,
+    Absorb, Bundle, BundlePayload, BundleReceiver, CoreError, Frame, Key, build_receipt,
+    encode_nack, parse_frame,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -181,9 +181,32 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
                             .await
                             .context("gateway: send NACK")?;
                     }
-                    Err(e) => {
-                        tracing::warn!(%bundle_id, error = %e, "gateway: absorb failed, dropping bundle");
+                    Err(CoreError::Crypto) => {
+                        // AEAD verification failed on a fully reconstructed envelope (Fix 1b):
+                        // the bundle is poisoned. Persist nothing, send no receipt, and drop
+                        // the receiver. The field, receiving no receipt within its timeout,
+                        // re-bursts (its existing backoff) and a fresh receiver retries the
+                        // whole bundle — so this stays retryable end-to-end. Never log key
+                        // material or plaintext; only ids and counts.
+                        tracing::warn!(
+                            %bundle_id,
+                            symbols_received,
+                            symbols_needed,
+                            "gateway: AEAD verification failed after reconstruction — \
+                             dropping bundle (no persist, no receipt); bundle remains retryable"
+                        );
                         receivers.remove(&bundle_id);
+                    }
+                    Err(e) => {
+                        // A single corrupt/malformed datagram (failed integrity tag or bad
+                        // framing) from radio interference or a forged packet (Fix 1a). Drop
+                        // just this datagram and KEEP the receiver's accumulated clean symbols
+                        // — one bad packet must never discard an in-progress bundle.
+                        tracing::debug!(
+                            %bundle_id,
+                            error = %e,
+                            "gateway: dropping corrupt datagram, keeping bundle progress"
+                        );
                     }
                 }
             }
@@ -228,7 +251,13 @@ fn persist_bundle(store: &Store, bundle: &Bundle) -> anyhow::Result<()> {
     match &bundle.payload {
         BundlePayload::Vitals(observations) => {
             let fhir: Vec<_> = observations.iter().map(tgw_fhir::to_fhir_json).collect();
-            store.complete_vitals(bundle.id, &fhir, &received_at)?;
+            // Fix 1c: compute advisory plausibility flags per observation at ingest. This is
+            // additive metadata — it never changes whether the observation is stored.
+            let flags: Vec<Vec<String>> = observations
+                .iter()
+                .map(tgw_fhir::plausibility_flags)
+                .collect();
+            store.complete_vitals(bundle.id, &fhir, &flags, &received_at)?;
         }
         BundlePayload::Image {
             mime,
@@ -373,19 +402,24 @@ fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
                 let observations = store.get_observations(id)?.ok_or_else(|| {
                     anyhow::anyhow!("delivered vitals bundle {id} is missing FHIR data")
                 })?;
-                for fhir_json in observations {
+                // Fix 1c: plausibility flags, index-aligned with the observations. Absent for
+                // bundles stored before flags existed → treated as "no flags".
+                let flags = store.get_flags(id)?.unwrap_or_default();
+                for (i, fhir_json) in observations.into_iter().enumerate() {
                     let patient_id = fhir_json
                         .get("subject")
                         .and_then(|subject| subject.get("reference"))
                         .and_then(|reference| reference.as_str())
                         .and_then(|reference| reference.strip_prefix("Patient/"))
                         .unwrap_or_default();
+                    let obs_flags = flags.get(i).cloned().unwrap_or_default();
                     items.push(json!({
                         "bundle_id": id.to_string(),
                         "received_at": received_at,
                         "patient_id": patient_id,
                         "kind": "vitals",
                         "summary": format_summary(&fhir_json),
+                        "flags": obs_flags,
                         "fhir": fhir_json,
                     }));
                 }

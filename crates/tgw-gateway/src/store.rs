@@ -33,6 +33,9 @@ const IMAGE_MIME: TableDefinition<u128, &str> = TableDefinition::new("image_mime
 const IMAGE_PATIENT: TableDefinition<u128, &str> = TableDefinition::new("image_patient");
 /// Per-bundle transfer state rendered by Contract-3's `/api/queue` endpoint.
 const QUEUE: TableDefinition<u128, &str> = TableDefinition::new("queue");
+/// Clinical plausibility flags (Fix 1c): key = bundle ID, value = JSON array-of-arrays,
+/// index-aligned with the bundle's OBSERVATIONS array. Additive metadata, never a gate.
+const FLAGS: TableDefinition<u128, &str> = TableDefinition::new("flags");
 
 /// Fallback MIME type when an image has no recorded `Content-Type`.
 const FALLBACK_MIME: &str = "application/octet-stream";
@@ -82,6 +85,7 @@ impl Store {
             let _ = txn.open_table(IMAGE_MIME)?;
             let _ = txn.open_table(IMAGE_PATIENT)?;
             let _ = txn.open_table(QUEUE)?;
+            let _ = txn.open_table(FLAGS)?;
         }
         txn.commit().context("gateway store: commit tables")?;
         Ok(())
@@ -226,19 +230,42 @@ impl Store {
         Ok(())
     }
 
-    /// Atomically persist all vitals observations and mark the bundle complete.
+    /// Atomically persist all vitals observations, their plausibility flags, and mark the
+    /// bundle complete.
+    ///
+    /// `flags` is index-aligned with `observations` (Fix 1c): `flags[i]` are the advisory
+    /// flags for `observations[i]`. Flags are additive metadata — storing them never changes
+    /// whether or how the observation itself is persisted.
     pub fn complete_vitals(
         &self,
         id: Uuid,
         observations: &[Value],
+        flags: &[Vec<String>],
         received_at: &str,
     ) -> anyhow::Result<()> {
         let fhir = serde_json::to_string(observations).context("serialize FHIR observations")?;
+        let flags_json = serde_json::to_string(flags).context("serialize plausibility flags")?;
         self.complete_bundle(id, received_at, |txn| {
             let mut observations = txn.open_table(OBSERVATIONS)?;
             observations.insert(id.as_u128(), fhir.as_str())?;
+            let mut flag_table = txn.open_table(FLAGS)?;
+            flag_table.insert(id.as_u128(), flags_json.as_str())?;
             Ok(())
         })
+    }
+
+    /// Retrieve the per-observation plausibility flags for a vitals bundle, index-aligned
+    /// with [`Store::get_observations`]. `None` if the bundle is unknown; an all-empty vector
+    /// for bundles stored before flags existed.
+    pub fn get_flags(&self, id: Uuid) -> anyhow::Result<Option<Vec<Vec<String>>>> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(FLAGS)?;
+        let Some(value) = table.get(id.as_u128())? else {
+            return Ok(None);
+        };
+        let flags: Vec<Vec<String>> =
+            serde_json::from_str(value.value()).context("parse stored plausibility flags")?;
+        Ok(Some(flags))
     }
 
     /// Atomically persist an image and mark the bundle complete.
@@ -451,6 +478,7 @@ mod tests {
                 serde_json::json!({"id":"first"}),
                 serde_json::json!({"id":"second"}),
             ],
+            &[vec![], vec![]],
             "2026-07-11T14:03:22Z",
         )
         .expect("complete");
@@ -466,6 +494,33 @@ mod tests {
         assert_eq!(queue[0].state, "receipt_sent");
         assert_eq!(queue[0].symbols_received, 3);
         assert_eq!(queue[0].symbols_needed, 5);
+    }
+
+    #[test]
+    fn complete_vitals_persists_and_returns_flags_index_aligned() {
+        let s = fresh_store("vitals_flags");
+        let id = Uuid::new_v4();
+        s.complete_vitals(
+            id,
+            &[serde_json::json!({"id":"a"}), serde_json::json!({"id":"b"})],
+            &[vec!["spo2-out-of-range".to_string()], vec![]],
+            "2026-07-11T14:03:22Z",
+        )
+        .expect("complete");
+
+        let flags = s.get_flags(id).expect("read").expect("present");
+        assert_eq!(flags.len(), 2, "one flag list per observation");
+        assert_eq!(flags[0], vec!["spo2-out-of-range".to_string()]);
+        assert!(
+            flags[1].is_empty(),
+            "the clean observation carries no flags"
+        );
+    }
+
+    #[test]
+    fn get_flags_is_none_for_unknown_bundle() {
+        let s = fresh_store("flags_unknown");
+        assert!(s.get_flags(Uuid::new_v4()).expect("read").is_none());
     }
 
     #[test]
