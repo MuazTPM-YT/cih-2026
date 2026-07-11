@@ -40,6 +40,26 @@ pub use store::Store;
 /// Maximum UDP datagram the gateway buffers (fits a 65535-byte IP payload).
 const MAX_DATAGRAM: usize = 65_535;
 
+/// Cap on concurrently-decoding bundles; the oldest partial is evicted past this. Defence in
+/// depth on the public port: even authenticated-but-abandoned bundles (a buggy or compromised
+/// paired client, or massive reordering) cannot grow decoder memory without bound.
+const MAX_INFLIGHT_BUNDLES: usize = 256;
+
+/// Choose the oldest in-flight bundle to evict when the receiver map is at capacity (LRU by
+/// first-seen). Returns `None` when under capacity.
+fn bundle_to_evict(
+    first_seen: &HashMap<Uuid, std::time::Instant>,
+    cap: usize,
+) -> Option<Uuid> {
+    if first_seen.len() < cap {
+        return None;
+    }
+    first_seen
+        .iter()
+        .min_by_key(|(_, seen)| **seen)
+        .map(|(id, _)| *id)
+}
+
 /// Shared state handed to every HTTP handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -131,6 +151,8 @@ pub async fn run_udp_listener(
     let mut receivers: HashMap<Uuid, BundleReceiver> = HashMap::new();
     // Where to send NACKs/receipts for each in-flight bundle (its last-seen field source).
     let mut sources: HashMap<Uuid, SocketAddr> = HashMap::new();
+    // First-seen instant per in-flight bundle, for the LRU eviction cap (defence in depth).
+    let mut first_seen: HashMap<Uuid, std::time::Instant> = HashMap::new();
     let mut buf = vec![0u8; MAX_DATAGRAM];
 
     loop {
@@ -181,6 +203,17 @@ pub async fn run_udp_listener(
                 // Drive the per-bundle receiver. The borrow of `receivers` ends once `absorb`
                 // returns, so we can mutate `receivers` again in the outcome arms below.
                 sources.insert(bundle_id, src);
+                // Cap authenticated in-flight bundles; evict the oldest partial on overflow.
+                // Delivery of any bundle clears its entry, so this only bites pathological cases.
+                if !receivers.contains_key(&bundle_id) {
+                    if let Some(victim) = bundle_to_evict(&first_seen, MAX_INFLIGHT_BUNDLES) {
+                        receivers.remove(&victim);
+                        sources.remove(&victim);
+                        first_seen.remove(&victim);
+                        tracing::warn!(evicted = %victim, "in-flight cap reached — evicted oldest partial bundle");
+                    }
+                    first_seen.insert(bundle_id, std::time::Instant::now());
+                }
                 let (outcome, symbols_received, symbols_needed) = {
                     let receiver = receivers
                         .entry(bundle_id)
@@ -205,6 +238,7 @@ pub async fn run_udp_listener(
                     Ok(Absorb::Complete(bundle)) => {
                         receivers.remove(&bundle_id);
                         sources.remove(&bundle_id);
+                        first_seen.remove(&bundle_id);
                         if handle_complete(&store, &bundle)? {
                             let receipt = build_receipt(bundle.id, &key);
                             sock.send_to(&receipt, src)
@@ -239,6 +273,7 @@ pub async fn run_udp_listener(
                         );
                         receivers.remove(&bundle_id);
                         sources.remove(&bundle_id);
+                        first_seen.remove(&bundle_id);
                     }
                     Err(e) => {
                         // A single corrupt/malformed datagram (failed integrity tag or bad
@@ -539,4 +574,20 @@ fn build_queue_json(store: &Store) -> anyhow::Result<serde_json::Value> {
         })
         .collect();
     Ok(serde_json::Value::Array(items))
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+
+    #[test]
+    fn evicts_oldest_only_at_capacity() {
+        let mut m = HashMap::new();
+        let t0 = std::time::Instant::now();
+        let oldest = Uuid::new_v4();
+        m.insert(oldest, t0);
+        m.insert(Uuid::new_v4(), t0 + std::time::Duration::from_millis(5));
+        assert_eq!(bundle_to_evict(&m, 3), None, "under cap: nothing evicted");
+        assert_eq!(bundle_to_evict(&m, 2), Some(oldest), "at cap: oldest chosen");
+    }
 }
