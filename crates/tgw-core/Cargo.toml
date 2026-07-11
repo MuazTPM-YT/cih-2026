@@ -21,3 +21,4 @@ raptorq.workspace = true
 rand.workspace = true
 sha2.workspace = true
 toml.workspace = true
+spake2 = "0.4"

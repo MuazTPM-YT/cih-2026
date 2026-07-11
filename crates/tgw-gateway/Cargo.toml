@@ -23,6 +23,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+rand = "0.8"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] } # ServiceExt::oneshot for handler tests

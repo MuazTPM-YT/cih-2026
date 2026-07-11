@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo test *)",
+      "Bash(git fetch *)",
+      "Bash(git rev-list *)",
+      "Bash(bash scripts/stress_e2e.sh relay)",
+      "Bash(git commit -q -m 'Validate reconstructed data and add peer-relay fallback *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Add netsim corruption mode and end-to-end stress harness *)",
+      "Bash(cargo build *)",
+      "Bash(git worktree *)",
+      "Bash(awk '{s+=$4} END {print s\" tests passing across the workspace \\(1 pre-existing multicast test fails only in this sandbox\\)\"}')",
+      "Bash(git commit -q -m ' *)"
+    ]
+  }
+}

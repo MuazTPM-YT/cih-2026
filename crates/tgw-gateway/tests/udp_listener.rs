@@ -94,6 +94,53 @@ async fn corrupt_datagrams_never_persist_and_get_no_receipt() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn unauthenticated_flood_earns_no_receipt_and_never_blocks_delivery() {
+    // Public-port hardening: a flood of DATA-shaped datagrams with random UUIDs and forged tags
+    // (an off-key attacker) must earn no receipt AND must not create per-bundle state that could
+    // starve a real delivery. We assert the observable end of that: after the flood, a genuine
+    // bundle under the real key still delivers with an authenticated receipt.
+    let key = Key::generate();
+    let store = fresh_store("flood");
+    let gw_addr = spawn_gateway(store.clone(), key.clone()).await;
+
+    // Attacker with no knowledge of the key.
+    let attacker = UdpSocket::bind("127.0.0.1:0").await.expect("attacker bind");
+    attacker.connect(gw_addr).await.expect("connect");
+    for _ in 0..300 {
+        let mut junk = vec![0x01u8, 0x01]; // WIRE_VERSION, FRAME_DATA
+        junk.extend_from_slice(uuid::Uuid::new_v4().as_bytes()); // random bundle id
+        junk.extend_from_slice(&[9u8; 12]); // OTI
+        junk.extend_from_slice(&[7u8; 40]); // fake symbol + fake integrity tag
+        attacker.send(&junk).await.expect("send junk");
+    }
+    // The attacker must receive nothing back for its garbage.
+    let mut abuf = vec![0u8; 2048];
+    let got = timeout(Duration::from_millis(300), attacker.recv(&mut abuf)).await;
+    assert!(
+        got.is_err(),
+        "the gateway must never answer unauthenticated DATA"
+    );
+
+    // A legitimate bundle under the real key still delivers despite the flood.
+    let bundle = Bundle::new_image("image/jpeg".into(), vec![0x33u8; 8_000], "P-9".into());
+    let datagrams = encode_bundle(&bundle, &key, &fec()).expect("encode");
+    let client = UdpSocket::bind("127.0.0.1:0").await.expect("client bind");
+    client.connect(gw_addr).await.expect("connect");
+    for dgram in &datagrams {
+        client.send(dgram).await.expect("send");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let mut buf = vec![0u8; 2048];
+    let received = timeout(Duration::from_secs(2), client.recv(&mut buf))
+        .await
+        .expect("a receipt must arrive despite the junk flood")
+        .expect("recv ok");
+    let verified = verify_receipt(&buf[..received], &key).expect("receipt must authenticate");
+    assert_eq!(verified, bundle.id);
+    assert!(store.is_delivered(bundle.id).expect("is_delivered"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn partial_corruption_still_delivers_with_a_receipt() {
     let key = Key::generate();
     let store = fresh_store("partial");

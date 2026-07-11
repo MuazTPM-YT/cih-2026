@@ -15,9 +15,14 @@ max_retries = 8
 gateway_addr = "192.168.1.50:47000"   # advertised address (informational)
 listen_addr = "0.0.0.0:47000"         # UDP bind for incoming DATA frames
 http_addr = "0.0.0.0:8080"            # dashboard + JSON API (Contract 3)
+# Cross-LAN pairing: the PUBLIC, port-forwarded address advertised in the pairing string that
+# `tgw-gateway pair` prints. Display/advertise only — the socket still binds `listen_addr`.
+# public_addr = "203.0.113.5:47000"
 
 [crypto]
-key_file = "./keys/device-a.key"      # same PSK as the paired field device
+# OPTIONAL when using pairing: `tgw-gateway pair` stores a session key and the serve path
+# prefers it, so no key_file is needed for the cross-LAN mode.
+key_file = "./keys/device-a.key"      # same PSK as the paired field device (LAN mode)
 
 [media]
 image_max_bytes = 30000

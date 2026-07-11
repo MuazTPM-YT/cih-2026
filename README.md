@@ -49,6 +49,31 @@ rustup target add aarch64-unknown-linux-musl
 cargo build --release --target aarch64-unknown-linux-musl -p tgw-field
 ```
 
+## Cross-LAN pairing (no key files)
+
+The field and hospital can connect across **different networks** (the open internet), not just
+the same LAN — over the same custom UDP/RaptorQ transport, with no hand-typed keys.
+
+1. The hospital operator **port-forwards one UDP port** (e.g. 47000) on their router to the
+   hospital machine, and sets `net.public_addr` in `config/gateway.toml`.
+2. Hospital: `tgw-gateway pair` — prints a short code and the exact command to run:
+   ```
+   Pairing code: 4-otter-cobalt
+   Field runs:   tgw-field pair "tgw1:203.0.113.5:47000:4-otter-cobalt"
+   ```
+3. Field: `tgw-field pair "tgw1:<host:port>:<code>"` — runs a **SPAKE2** handshake over UDP and
+   stores a fresh per-session key locally. Then `tgw-field daemon` delivers as usual.
+
+The pairing code derives the session key on both ends without ever transmitting it; a wrong
+code fails key-confirmation, so no data moves under an unconfirmed key. The gateway's public
+UDP port is hardened: unauthenticated datagrams are dropped before any decoder state is
+allocated (session-keyed MAC gate + in-flight caps), and the pairing responder uses a stateless
+anti-spoof cookie plus a lockout after repeated bad codes. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §6.
+
+**Limitation:** if the hospital's ISP uses CGNAT (no forwardable public port), direct dialing
+cannot work; that case would need hole-punching or a relay, which is out of scope.
+
 ## Resilience evidence
 
 `tests/lossy_delivery.rs` proves delivery under degradation without root or a live network:

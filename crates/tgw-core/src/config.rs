@@ -103,13 +103,19 @@ pub struct NetConfig {
     pub listen_addr: String,
     /// Dashboard/API bind (gateway side; informational for the field client).
     pub http_addr: String,
+    /// Public, port-forwarded address advertised in a pairing string (cross-LAN mode).
+    /// Display/advertise only — the socket still binds `listen_addr`. `None` for LAN-only setups.
+    #[serde(default)]
+    pub public_addr: Option<String>,
 }
 
 /// `[crypto]` — key location. No default on purpose (docs/ARCHITECTURE.md §7).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CryptoConfig {
-    /// Path to the 64-hex-char PSK file. Generate with `tgw-field keygen`.
-    pub key_file: std::path::PathBuf,
+    /// Path to the 64-hex-char PSK file. Generate with `tgw-field keygen`. `None` when the key
+    /// comes from a paired session instead of a file (`tgw-field pair` / `tgw-gateway pair`).
+    #[serde(default)]
+    pub key_file: Option<std::path::PathBuf>,
 }
 
 /// `[media]` — image handling.
@@ -212,7 +218,7 @@ impl Config {
             self.net.http_addr = v;
         }
         if let Some(v) = get("TGW_KEY_FILE") {
-            self.crypto.key_file = std::path::PathBuf::from(v);
+            self.crypto.key_file = Some(std::path::PathBuf::from(v));
         }
         if let Some(Ok(bps)) = get("TGW_BANDWIDTH_BPS").map(|v| v.parse::<u32>()) {
             self.link.bandwidth_bps = bps;
@@ -299,7 +305,7 @@ mod tests {
         assert_eq!(config.net.gateway_addr, "192.168.1.50:47000");
         assert_eq!(
             config.crypto.key_file,
-            std::path::PathBuf::from("./keys/device-a.key")
+            Some(std::path::PathBuf::from("./keys/device-a.key"))
         );
         assert_eq!(config.media.image_max_bytes, 30_000);
     }
@@ -353,6 +359,22 @@ mod tests {
         assert_eq!(config.relay.discovery_addr, "255.255.255.255:47555");
         assert_eq!(config.relay.announce_interval_ms, 1500);
         assert_eq!(config.relay.peer_ttl_ms, 6000);
+    }
+
+    #[test]
+    fn public_addr_optional_and_key_file_optional() {
+        // No key_file line → None, still valid (pairing mode).
+        let minimal = SAMPLE.replace("key_file = \"./keys/device-a.key\"", "");
+        let cfg = Config::from_toml_str(&minimal).expect("parses without key_file");
+        assert!(cfg.crypto.key_file.is_none());
+        assert!(cfg.net.public_addr.is_none());
+        // With public_addr set.
+        let with = SAMPLE.replace(
+            "http_addr = \"0.0.0.0:8080\"",
+            "http_addr = \"0.0.0.0:8080\"\npublic_addr = \"203.0.113.5:47000\"",
+        );
+        let cfg = Config::from_toml_str(&with).expect("parses with public_addr");
+        assert_eq!(cfg.net.public_addr.as_deref(), Some("203.0.113.5:47000"));
     }
 
     #[test]

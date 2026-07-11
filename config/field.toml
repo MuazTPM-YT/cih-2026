@@ -27,7 +27,9 @@ listen_addr = "0.0.0.0:47000"         # local bind for return frames (receipts/N
 http_addr = "0.0.0.0:8080"            # unused on the field side; present for symmetry
 
 [crypto]
-key_file = "./keys/device-a.key"      # 32-byte PSK; generate with `tgw-field keygen`
+# OPTIONAL when using pairing: after `tgw-field pair "tgw1:<host:port>:<code>"`, the derived
+# session key is used instead of this file, so no key_file is needed for the cross-LAN mode.
+key_file = "./keys/device-a.key"      # 32-byte PSK; generate with `tgw-field keygen` (LAN mode)
 
 [media]
 image_max_bytes = 30000    # JPEG recompression target for photos

@@ -106,6 +106,12 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Pair with a hospital across the internet using a code it displays (no key files).
+    /// Runs SPAKE2 over UDP and stores the derived session key + hospital address locally.
+    Pair {
+        /// The pairing string the hospital shows: `tgw1:<host:port>:<code>`.
+        pairing_string: String,
+    },
     /// Run continuously: drain the queue, resume interrupted transfers, serve NACKs.
     Daemon,
     /// Serve the browser field-capture UI and bridge its captures onto the REAL send path.
@@ -161,6 +167,7 @@ async fn main() -> Result<()> {
             let bundle = image_bundle(&cli.config, &path, &patient, mime)?;
             enqueue_and_drain(&cli.config, bundle).await
         }
+        Command::Pair { pairing_string } => pair_cmd(&pairing_string).await,
         Command::Status { watch } => status(&cli.config, watch).await,
         Command::Requeue { id, all } => requeue_cmd(id, all),
         Command::Daemon => daemon(&cli.config).await,
@@ -250,12 +257,57 @@ fn queue_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("field-queue.redb"))
 }
 
-fn load_config_and_key(config_path: &Path) -> Result<(Config, Key)> {
-    let config = Config::load(config_path)
-        .with_context(|| format!("loading config {}", config_path.display()))?;
-    let key = Key::from_file(&config.crypto.key_file)
-        .context("loading PSK (generate one with `tgw-field keygen`)")?;
-    Ok((config, key))
+/// Resolve the effective (key, gateway target) for the send path: a paired session (from
+/// `tgw-field pair`) wins over the config's `key_file` + `gateway_addr`, so the cross-LAN mode
+/// needs no key file. Falls back to the LAN path when no session exists.
+fn resolve_key_and_target(config: &Config) -> Result<(Key, String)> {
+    if let Some(session) = tgw_field::session::load(&tgw_field::session::default_path())? {
+        return Ok((session.key, session.hospital_addr));
+    }
+    let key_path = config.crypto.key_file.clone().context(
+        "no paired session and no [crypto].key_file — run `tgw-field pair \"tgw1:…\"` first, \
+         or generate a key with `tgw-field keygen`",
+    )?;
+    let key = Key::from_file(&key_path).context("loading PSK")?;
+    Ok((key, config.net.gateway_addr.clone()))
+}
+
+/// Parse a pairing string `tgw1:<host:port>:<code>` into (addr, code).
+fn parse_pairing_string(s: &str) -> Result<(String, String)> {
+    let rest = s
+        .strip_prefix("tgw1:")
+        .context("pairing string must start with `tgw1:`")?;
+    // Format is exactly `tgw1:HOST:PORT:CODE`; the code follows the last ':' after the port.
+    let (addr, code) = rest
+        .rsplit_once(':')
+        .context("pairing string missing code")?;
+    if addr.parse::<SocketAddr>().is_err() {
+        bail!("pairing string address {addr:?} is not host:port");
+    }
+    if code.is_empty() {
+        bail!("pairing string has an empty code");
+    }
+    Ok((addr.to_string(), code.to_string()))
+}
+
+/// Pair with a hospital: run SPAKE2 over UDP, then persist the derived session key + address.
+async fn pair_cmd(pairing_string: &str) -> Result<()> {
+    let (addr, code) = parse_pairing_string(pairing_string)?;
+    println!("pairing with hospital at {addr} …");
+    let key = tgw_field::pairing::pair_with_hospital(&addr, &code, Duration::from_secs(60)).await?;
+    let path = tgw_field::session::default_path();
+    tgw_field::session::save(
+        &path,
+        &tgw_field::session::Session {
+            hospital_addr: addr,
+            key,
+        },
+    )?;
+    println!(
+        "paired ✓  session saved to {} — now run `tgw-field daemon`",
+        path.display()
+    );
+    Ok(())
 }
 
 fn image_bundle(
@@ -264,7 +316,8 @@ fn image_bundle(
     patient: &str,
     mime: Option<String>,
 ) -> Result<Bundle> {
-    let (config, _key) = load_config_and_key(config_path)?;
+    let config = Config::load(config_path)
+        .with_context(|| format!("loading config {}", config_path.display()))?;
     let data = std::fs::read(image_path)
         .with_context(|| format!("reading image {}", image_path.display()))?;
     if data.len() > config.media.image_max_bytes {
@@ -296,7 +349,9 @@ fn image_bundle(
 /// Enqueue `bundle`, then drain the queue (highest priority first) until empty or stuck.
 /// Exits non-zero if THIS bundle did not reach `delivered` — the field worker must know.
 async fn enqueue_and_drain(config_path: &Path, bundle: Bundle) -> Result<()> {
-    let (config, key) = load_config_and_key(config_path)?;
+    let config = Config::load(config_path)
+        .with_context(|| format!("loading config {}", config_path.display()))?;
+    let (key, target) = resolve_key_and_target(&config)?;
     let queue = Queue::open(&queue_path())?;
 
     let record = QueuedBundle::from_bundle(&bundle, &key)?;
@@ -305,7 +360,7 @@ async fn enqueue_and_drain(config_path: &Path, bundle: Bundle) -> Result<()> {
 
     // One-shot send uses the direct link only (no time to discover peers); the daemon runs
     // discovery and enables relay failover.
-    drain_queue(&config, &key, &queue, None).await?;
+    drain_queue(&config, &key, &target, &queue, None).await?;
 
     match queue.get(bundle.id)?.map(|r| r.state) {
         Some(BundleState::Delivered) => Ok(()),
@@ -323,10 +378,11 @@ async fn enqueue_and_drain(config_path: &Path, bundle: Bundle) -> Result<()> {
 async fn drain_queue(
     config: &Config,
     key: &Key,
+    target: &str,
     queue: &Queue,
     peers: Option<&PeerTable>,
 ) -> Result<()> {
-    let socket = open_socket(config).await?;
+    let socket = open_socket(&config.net.listen_addr, target).await?;
     let mut pacer = Pacer::new(config.link.bandwidth_bps, PACER_BURST_BYTES);
 
     while let Some(record) = queue.next_sendable()? {
@@ -346,14 +402,14 @@ async fn drain_queue(
     Ok(())
 }
 
-async fn open_socket(config: &Config) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind(&config.net.listen_addr)
+async fn open_socket(listen_addr: &str, target_addr: &str) -> Result<UdpSocket> {
+    let socket = UdpSocket::bind(listen_addr)
         .await
-        .with_context(|| format!("binding {}", config.net.listen_addr))?;
+        .with_context(|| format!("binding {listen_addr}"))?;
     socket
-        .connect(&config.net.gateway_addr)
+        .connect(target_addr)
         .await
-        .with_context(|| format!("connecting to gateway {}", config.net.gateway_addr))?;
+        .with_context(|| format!("connecting to gateway {target_addr}"))?;
     Ok(socket)
 }
 
@@ -482,9 +538,11 @@ async fn try_relay_failover(
 }
 
 async fn daemon(config_path: &Path) -> Result<()> {
-    let (config, key) = load_config_and_key(config_path)?;
+    let config = Config::load(config_path)
+        .with_context(|| format!("loading config {}", config_path.display()))?;
+    let (key, target) = resolve_key_and_target(&config)?;
     let queue = Queue::open(&queue_path())?; // open() re-queues interrupted transfers
-    let socket = open_socket(&config).await?;
+    let socket = open_socket(&config.net.listen_addr, &target).await?;
     let mut pacer = Pacer::new(config.link.bandwidth_bps, PACER_BURST_BYTES);
 
     // Fix 2: when the relay fallback is enabled, announce presence, learn peers, and accept
@@ -492,7 +550,7 @@ async fn daemon(config_path: &Path) -> Result<()> {
     let peers = start_relay_services(&config);
 
     tracing::info!(
-        gateway = %config.net.gateway_addr,
+        gateway = %target,
         bandwidth_bps = config.link.bandwidth_bps,
         relay = config.relay.enabled,
         circuit_breaker_threshold = config.retry.circuit_breaker_threshold,
@@ -620,6 +678,8 @@ fn start_relay_services(config: &Config) -> Option<PeerTable> {
 struct BridgeState {
     config: Config,
     key: Key,
+    /// Resolved gateway target (paired session address, or the config's `gateway_addr`).
+    target: String,
     queue: Queue,
     /// Serializes captures so concurrent POSTs don't interleave drains of the shared queue.
     send_lock: tokio::sync::Mutex<()>,
@@ -655,11 +715,14 @@ struct CaptureResult {
 
 /// Serve the browser field UI and bridge its captures onto the real UDP send path.
 async fn serve(config_path: &Path, http: &str, ui_dir: PathBuf) -> Result<()> {
-    let (config, key) = load_config_and_key(config_path)?;
+    let config = Config::load(config_path)
+        .with_context(|| format!("loading config {}", config_path.display()))?;
+    let (key, target) = resolve_key_and_target(&config)?;
     let queue = Queue::open(&queue_path())?;
     let state = Arc::new(BridgeState {
         config,
         key,
+        target,
         queue,
         send_lock: tokio::sync::Mutex::new(()),
     });
@@ -676,7 +739,7 @@ async fn serve(config_path: &Path, http: &str, ui_dir: PathBuf) -> Result<()> {
         .with_context(|| format!("binding field bridge {http}"))?;
     tracing::info!(
         http = %http,
-        gateway = %state.config.net.gateway_addr,
+        gateway = %state.target,
         ui = %ui_dir.display(),
         "field bridge up — POST /api/capture runs the REAL seal→RaptorQ→UDP send"
     );
@@ -727,7 +790,7 @@ async fn capture_handler(
     // Serialize the drain so concurrent captures don't interleave on the shared queue/socket.
     {
         let _guard = state.send_lock.lock().await;
-        drain_queue(&state.config, &state.key, &state.queue, None)
+        drain_queue(&state.config, &state.key, &state.target, &state.queue, None)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     }
@@ -811,4 +874,22 @@ async fn status(config_path: &Path, watch: bool) -> Result<()> {
 fn short_id(id: uuid::Uuid) -> String {
     let hyphenated = id.to_string();
     hyphenated.chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod pairing_string_tests {
+    use super::*;
+
+    #[test]
+    fn parses_well_formed_and_rejects_bad() {
+        let (a, c) = parse_pairing_string("tgw1:203.0.113.5:47000:4-otter-cobalt").expect("ok");
+        assert_eq!(a, "203.0.113.5:47000");
+        assert_eq!(c, "4-otter-cobalt");
+        assert!(parse_pairing_string("nope").is_err());
+        assert!(
+            parse_pairing_string("tgw1:203.0.113.5:47000:").is_err(),
+            "empty code"
+        );
+        assert!(parse_pairing_string("tgw1:not-an-addr:code").is_err());
+    }
 }

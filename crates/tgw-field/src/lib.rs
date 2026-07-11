@@ -10,7 +10,9 @@
 pub mod breaker;
 pub mod discovery;
 pub mod pacer;
+pub mod pairing;
 pub mod queue;
 pub mod relay;
 pub mod sender;
+pub mod session;
 pub mod vitals;

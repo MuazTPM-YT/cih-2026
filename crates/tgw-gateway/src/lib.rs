@@ -37,8 +37,66 @@ mod store;
 /// Redb-backed persistence for delivered bundles and gateway queue state.
 pub use store::Store;
 
+pub mod pairing;
+
+/// Persisted pairing-derived key for the gateway (hex, `0600`). Absent ⇒ fall back to key_file.
+pub mod session {
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Context, Result};
+    use tgw_core::Key;
+
+    /// Default gateway session path; `TGW_GW_SESSION_PATH` overrides.
+    #[must_use]
+    pub fn default_path() -> PathBuf {
+        std::env::var("TGW_GW_SESSION_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("gateway-session.key"))
+    }
+
+    /// Save `key` as hex, `0600`.
+    pub fn save(path: &Path, key: &Key) -> Result<()> {
+        std::fs::write(path, key.to_hex()).with_context(|| format!("write {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("chmod 600 {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Load the key, or `Ok(None)` if absent.
+    pub fn load(path: &Path) -> Result<Option<Key>> {
+        match std::fs::read_to_string(path) {
+            Ok(hex) => Ok(Some(
+                Key::from_hex(hex.trim()).context("gateway session key")?,
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+        }
+    }
+}
+
 /// Maximum UDP datagram the gateway buffers (fits a 65535-byte IP payload).
 const MAX_DATAGRAM: usize = 65_535;
+
+/// Cap on concurrently-decoding bundles; the oldest partial is evicted past this. Defence in
+/// depth on the public port: even authenticated-but-abandoned bundles (a buggy or compromised
+/// paired client, or massive reordering) cannot grow decoder memory without bound.
+const MAX_INFLIGHT_BUNDLES: usize = 256;
+
+/// Choose the oldest in-flight bundle to evict when the receiver map is at capacity (LRU by
+/// first-seen). Returns `None` when under capacity.
+fn bundle_to_evict(first_seen: &HashMap<Uuid, std::time::Instant>, cap: usize) -> Option<Uuid> {
+    if first_seen.len() < cap {
+        return None;
+    }
+    first_seen
+        .iter()
+        .min_by_key(|(_, seen)| **seen)
+        .map(|(id, _)| *id)
+}
 
 /// Shared state handed to every HTTP handler.
 #[derive(Clone)]
@@ -131,6 +189,8 @@ pub async fn run_udp_listener(
     let mut receivers: HashMap<Uuid, BundleReceiver> = HashMap::new();
     // Where to send NACKs/receipts for each in-flight bundle (its last-seen field source).
     let mut sources: HashMap<Uuid, SocketAddr> = HashMap::new();
+    // First-seen instant per in-flight bundle, for the LRU eviction cap (defence in depth).
+    let mut first_seen: HashMap<Uuid, std::time::Instant> = HashMap::new();
     let mut buf = vec![0u8; MAX_DATAGRAM];
 
     loop {
@@ -167,9 +227,31 @@ pub async fn run_udp_listener(
 
         match frame {
             Frame::Data { bundle_id } => {
+                // PUBLIC-PORT HARDENING: authenticate the datagram under the session key BEFORE
+                // touching any per-bundle map. An off-key flood (random UUIDs, forged tags) is
+                // dropped here, so it can never create BundleReceiver/sources state — closing the
+                // unauthenticated memory-exhaustion vector on an internet-facing port. `absorb`
+                // re-checks the tag as defence in depth; the cost here is one HMAC over ~1 KB,
+                // far cheaper than a decoder slot, and a corrupt packet leaves any legitimate
+                // in-flight bundle's accumulated symbols untouched.
+                if !tgw_core::authenticate_data(dgram, &key) {
+                    tracing::debug!(%bundle_id, from = %src, "dropping unauthenticated DATA (no state created)");
+                    continue;
+                }
                 // Drive the per-bundle receiver. The borrow of `receivers` ends once `absorb`
                 // returns, so we can mutate `receivers` again in the outcome arms below.
                 sources.insert(bundle_id, src);
+                // Cap authenticated in-flight bundles; evict the oldest partial on overflow.
+                // Delivery of any bundle clears its entry, so this only bites pathological cases.
+                if !receivers.contains_key(&bundle_id) {
+                    if let Some(victim) = bundle_to_evict(&first_seen, MAX_INFLIGHT_BUNDLES) {
+                        receivers.remove(&victim);
+                        sources.remove(&victim);
+                        first_seen.remove(&victim);
+                        tracing::warn!(evicted = %victim, "in-flight cap reached — evicted oldest partial bundle");
+                    }
+                    first_seen.insert(bundle_id, std::time::Instant::now());
+                }
                 let (outcome, symbols_received, symbols_needed) = {
                     let receiver = receivers
                         .entry(bundle_id)
@@ -194,6 +276,7 @@ pub async fn run_udp_listener(
                     Ok(Absorb::Complete(bundle)) => {
                         receivers.remove(&bundle_id);
                         sources.remove(&bundle_id);
+                        first_seen.remove(&bundle_id);
                         if handle_complete(&store, &bundle)? {
                             let receipt = build_receipt(bundle.id, &key);
                             sock.send_to(&receipt, src)
@@ -228,6 +311,7 @@ pub async fn run_udp_listener(
                         );
                         receivers.remove(&bundle_id);
                         sources.remove(&bundle_id);
+                        first_seen.remove(&bundle_id);
                     }
                     Err(e) => {
                         // A single corrupt/malformed datagram (failed integrity tag or bad
@@ -528,4 +612,24 @@ fn build_queue_json(store: &Store) -> anyhow::Result<serde_json::Value> {
         })
         .collect();
     Ok(serde_json::Value::Array(items))
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+
+    #[test]
+    fn evicts_oldest_only_at_capacity() {
+        let mut m = HashMap::new();
+        let t0 = std::time::Instant::now();
+        let oldest = Uuid::new_v4();
+        m.insert(oldest, t0);
+        m.insert(Uuid::new_v4(), t0 + std::time::Duration::from_millis(5));
+        assert_eq!(bundle_to_evict(&m, 3), None, "under cap: nothing evicted");
+        assert_eq!(
+            bundle_to_evict(&m, 2),
+            Some(oldest),
+            "at cap: oldest chosen"
+        );
+    }
 }
