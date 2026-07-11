@@ -1182,6 +1182,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "rand",
  "redb",
  "serde",
  "serde_json",

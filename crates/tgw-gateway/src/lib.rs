@@ -39,6 +39,43 @@ pub use store::Store;
 
 pub mod pairing;
 
+/// Persisted pairing-derived key for the gateway (hex, `0600`). Absent ⇒ fall back to key_file.
+pub mod session {
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Context, Result};
+    use tgw_core::Key;
+
+    /// Default gateway session path; `TGW_GW_SESSION_PATH` overrides.
+    #[must_use]
+    pub fn default_path() -> PathBuf {
+        std::env::var("TGW_GW_SESSION_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("gateway-session.key"))
+    }
+
+    /// Save `key` as hex, `0600`.
+    pub fn save(path: &Path, key: &Key) -> Result<()> {
+        std::fs::write(path, key.to_hex()).with_context(|| format!("write {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("chmod 600 {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Load the key, or `Ok(None)` if absent.
+    pub fn load(path: &Path) -> Result<Option<Key>> {
+        match std::fs::read_to_string(path) {
+            Ok(hex) => Ok(Some(Key::from_hex(hex.trim()).context("gateway session key")?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+        }
+    }
+}
+
 /// Maximum UDP datagram the gateway buffers (fits a 65535-byte IP payload).
 const MAX_DATAGRAM: usize = 65_535;
 
