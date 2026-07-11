@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Field Capture</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+  <div class="app-container">
+    <div class="card">
+      
+      <!-- Header -->
+      <header class="header">
+        <h1 class="title">Field capture</h1>
+        <div class="status-badge" id="global-status">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path><path d="M10.71 5.05A16 16 0 0 1 22.58 9"></path><path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>
+          queued for send
+        </div>
+      </header>
+
+      <form id="capture-form" novalidate autocomplete="off">
+        <!-- Patient ID -->
+        <div class="form-group">
+          <label for="patient-id" class="input-label">Patient ID</label>
+          <input type="text" id="patient-id" class="input-field" placeholder="P-1023" required>
+        </div>
+
+        <!-- Image Buttons -->
+        <div class="image-buttons">
+          <button type="button" class="img-btn" id="btn-take-photo">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+            <span>Take photo</span>
+          </button>
+          <!-- Native capture is a reliable fallback on mobile browsers. -->
+          <input type="file" id="input-take-photo" accept="image/*" capture="environment" class="sr-only">
+          
+          <label class="img-btn" tabindex="0">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            <span>Upload image</span>
+            <input type="file" id="input-upload-image" accept="image/*" class="sr-only">
+          </label>
+        </div>
+
+        <!-- Structured Vitals -->
+        <div class="vitals-section">
+          <label class="input-label">Structured vitals</label>
+          
+          <div class="vital-row">
+            <div class="vital-col">
+              <label for="vital-temp" class="vital-sub-label">Temperature</label>
+              <div class="input-with-unit">
+                <input type="number" id="vital-temp" class="input-field" step="0.1" placeholder="98.6">
+                <span class="unit">°F</span>
+              </div>
+            </div>
+            <div class="vital-col">
+              <label for="temp-site" class="vital-sub-label">Site <span id="site-req" class="req-star" hidden>*</span></label>
+              <select id="temp-site" class="input-field select-field">
+                <option value="">Select...</option>
+                <option value="Oral">Oral</option>
+                <option value="Axilla">Axilla</option>
+                <option value="Rectal">Rectal</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="vital-row">
+            <div class="vital-col">
+              <label for="vital-pulse" class="vital-sub-label">Pulse</label>
+              <div class="input-with-unit">
+                <input type="number" id="vital-pulse" class="input-field" placeholder="72">
+                <span class="unit">bpm</span>
+              </div>
+            </div>
+            <div class="vital-col">
+              <label for="vital-resp" class="vital-sub-label">Respiration</label>
+              <div class="input-with-unit">
+                <input type="number" id="vital-resp" class="input-field" placeholder="16">
+                <span class="unit-sm">breaths/min</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="vital-row bp-row">
+            <div class="vital-col bp-col">
+              <label class="vital-sub-label">Blood pressure</label>
+              <div class="bp-inputs">
+                <input type="number" id="vital-bp-sys" class="input-field bp-input" placeholder="120" aria-label="Systolic">
+                <span class="bp-slash">/</span>
+                <input type="number" id="vital-bp-dia" class="input-field bp-input" placeholder="80" aria-label="Diastolic">
+                <span class="unit" style="margin-left:8px">mmHg</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Emergency Notes -->
+        <div class="form-group">
+          <label for="notes" class="input-label">Emergency notes</label>
+          <textarea id="notes" class="input-field textarea-field" placeholder="BP 142/95, SpO2 91%, pulse 108..."></textarea>
+        </div>
+
+        <!-- Selected Image Pill -->
+        <div id="image-pill" class="image-pill" hidden>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a0a0a0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+          <span id="image-filename" class="filename">photo.jpg</span>
+          <button type="button" id="btn-remove-image" class="remove-btn" aria-label="Remove image">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+
+        <!-- Send Button -->
+        <button type="submit" id="btn-send" class="send-btn" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          <span>Send to hospital</span>
+        </button>
+      </form>
+
+      <div class="divider"></div>
+
+      <!-- Recently Sent -->
+      <div class="recently-sent">
+        <div class="section-title">recently sent</div>
+        <ul id="sent-list" class="sent-list">
+          <li class="empty-state" id="sent-empty">Nothing sent yet</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Camera Overlay (fullscreen viewfinder) -->
+  <div id="camera-overlay" class="camera-overlay" hidden>
+    <div class="camera-container">
+      <video id="camera-video" class="camera-video" autoplay playsinline></video>
+      <canvas id="camera-canvas" class="sr-only"></canvas>
+      <div id="camera-error" class="camera-error" hidden>
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+        <p id="camera-error-text" class="camera-error-text"></p>
+        <button type="button" id="btn-camera-retry" class="camera-ctrl-btn camera-retry-btn">Try again</button>
+      </div>
+      <div class="camera-controls">
+        <button type="button" id="btn-camera-close" class="camera-ctrl-btn camera-close-btn" aria-label="Close camera">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+        <button type="button" id="btn-camera-capture" class="camera-ctrl-btn camera-capture-btn" aria-label="Take photo">
+          <div class="capture-ring"></div>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
