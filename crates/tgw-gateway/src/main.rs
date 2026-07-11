@@ -1,7 +1,7 @@
 //! `tgw-gateway` binary — thin async shell. OWNER: Twaha.
 //!
-//! Scaffold: starts the HTTP server (serving the dashboard + mock fixtures). Wire up config
-//! parsing (Phase F) and the UDP listener (Phase B) at the marked TODOs.
+//! Loads the Contract-4 TOML config, opens the redb store, then runs the UDP decode
+//! listener and the store-backed HTTP API (dashboard + live JSON) concurrently.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -1,11 +1,13 @@
 //! `tgw-gateway` library — UDP receiver/decoder + axum HTTP API (Contract 3).
 //!
 //! OWNER: Twaha. Binaries are thin async shells (see `main.rs`); logic lives here so the
-//! integration test can drive it in-process (Phase D).
+//! integration test can drive it in-process.
 //!
-//! At scaffold stage the HTTP layer already serves the mock fixtures from
-//! `static/mock/*.json`, so the dashboard works end-to-end immediately. The UDP decode path
-//! and the redb-backed real API are `todo!()` — fill them in Phases B/E/F.
+//! Two routers ship: [`router`] serves the `static/mock/*.json` fixtures (used by the
+//! `api_contract` tests and quick dashboard bring-up), and [`router_with_store`] backs the
+//! same Contract-3 shapes with the live redb [`Store`]. The UDP decode path
+//! ([`run_udp_listener`]) reassembles bundles, emits FHIR + AEAD receipts, and drives the
+//! gateway-side NACK/repair loop. All are implemented and tested.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -312,19 +314,19 @@ fn on_complete(bundle: &Bundle) {
 // --- HTTP handlers ---------------------------------------------------------------------
 
 async fn get_observations(State(state): State<AppState>) -> Response {
-    // PHASE-B: serve the mock fixture. PHASE-F: back this with the redb store.
+    // Mock router: serve the static fixture. The live path is `get_observations_store`.
     serve_mock(&state, "observations.json").await
 }
 
 async fn get_queue(State(state): State<AppState>) -> Response {
-    // PHASE-B: serve the mock fixture. PHASE-F: back this with live queue state.
+    // Mock router: serve the static fixture. The live path is `get_queue_store`.
     serve_mock(&state, "queue.json").await
 }
 
 async fn get_image(Path(bundle_id): Path<String>, State(_state): State<AppState>) -> Response {
-    // TODO(PHASE-F): read image bytes from the redb store; set the correct Content-Type.
-    tracing::debug!(%bundle_id, "image requested (not available in scaffold)");
-    (StatusCode::NOT_FOUND, "image not available in scaffold").into_response()
+    // Mock router has no image bytes; the live path is `get_image_store` (redb-backed).
+    tracing::debug!(%bundle_id, "image requested on the mock router (no store)");
+    (StatusCode::NOT_FOUND, "image not available in mock mode").into_response()
 }
 
 /// Demo-only sink: reads the body and returns 200, for the failing-`curl` comparison.

@@ -1,16 +1,14 @@
-//! THE resilience evidence test — brief §7 ("evidence, not claims"). OWNER: Twaha.
+//! THE resilience evidence test — brief §8 ("evidence, not claims"). OWNER: Twaha.
 //!
-//! This is the one suite that CANNOT go green on Twaha's branch alone: it exercises Muaz's
-//! real `tgw-core` FEC (encode/decode) and the netsim `LossModel`, all currently `todo!()`.
-//! It compiles today (so `cargo test --no-run` is clean) and is `#[ignore]`d; run it jointly
-//! with Muaz at the H10 checkpoint:
+//! Two levels, both run by default (no `#[ignore]`):
 //!
-//!   cargo test --test lossy_delivery -- --ignored
-//!
-//! What it proves: a clinical bundle, fountain-coded and sent with repair overhead, is
-//! reconstructed byte-for-byte after 25% of its datagrams are deterministically dropped.
-//! The fuller gateway+receipt end-to-end (store, DELIVERED receipts, priority) is layered on
-//! in Phase D/E once those gateway APIs exist — see tasks/twaha-agent-prompt.md.
+//! 1. `vitals_and_image_survive_25pct_loss` — a library-level proof: a clinical bundle,
+//!    fountain-coded with repair overhead, reconstructs byte-for-byte after 25% of its
+//!    datagrams are deterministically dropped (real `tgw-core` FEC + netsim `LossModel`).
+//! 2. `full_lossy_delivery_through_proxy_and_gateway` — the full socket end-to-end: field
+//!    `deliver` → `tgw-netsim` proxy (25% loss + burst + 64 kbps + jitter) → real gateway
+//!    `run_udp_listener` → AEAD `DELIVERED` receipts, asserting every bundle lands in the
+//!    gateway's redb store within a bounded timeout, at the default 1.4× overhead.
 
 use std::net::SocketAddr;
 use std::path::Path;

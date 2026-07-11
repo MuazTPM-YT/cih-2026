@@ -1,8 +1,6 @@
-//! Executable spec for `tgw_fhir::to_fhir_json` (Phase A). These tests ARE the contract:
-//! make the code satisfy them — never weaken a test. FHIR R5 reference:
+//! Executable spec for `tgw_fhir::to_fhir_json` (+ `image_media_json`). These tests ARE the
+//! contract: make the code satisfy them — never weaken a test. FHIR R5 reference:
 //! <https://hl7.org/fhir/observation.html> (R5, NOT build.fhir.org — see docs/DECISIONS.md).
-//!
-//! Currently RED: `to_fhir_json` is `todo!()`. Phase A is done when every test here is GREEN.
 
 use serde_json::Value;
 use tgw_core::{Component, Measure, VitalsObservation};

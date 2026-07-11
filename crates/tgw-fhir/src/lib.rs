@@ -4,7 +4,8 @@
 //! build.fhir.org (that serves the R6 ballot; see docs/DECISIONS.md). The gateway is the
 //! FHIR boundary: it emits genuine R5 JSON while the wire format stays compact.
 //!
-//! Implement `to_fhir_json` in **Phase A** of tasks/twaha-agent-prompt.md.
+//! [`to_fhir_json`] maps vitals to an R5 `Observation`; [`image_media_json`] maps a delivered
+//! image to an R5 `Media` resource. The executable spec is in `tests/r5_contract.rs`.
 
 use time::format_description::well_known::Rfc3339;
 
