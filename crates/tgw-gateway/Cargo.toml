@@ -15,8 +15,16 @@ tower-http.workspace = true
 redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+time.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] } # ServiceExt::oneshot for handler tests
+serde_json.workspace = true
+tokio.workspace = true

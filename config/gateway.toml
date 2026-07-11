@@ -21,3 +21,6 @@ key_file = "./keys/device-a.key"      # same PSK as the paired field device
 
 [media]
 image_max_bytes = 30000
+
+[storage]
+db_path = "gateway.redb"

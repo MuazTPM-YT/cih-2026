@@ -1,6 +1,6 @@
-# PLACEHOLDER — owned by Muaz (muaz/core) per tasks/CONTRACTS.md.
-# Contract-1 stub so Twaha's crates compile. Muaz's branch is authoritative;
-# do NOT build real transport/crypto logic here on Twaha's branch.
+# tgw-core — OWNER: Muaz (muaz/core) per tasks/CONTRACTS.md.
+# Bundle model, CBOR/lz4/AEAD codec, RaptorQ framing, wire protocol, config types.
+# Contract 1 (tasks/CONTRACTS.md) is the frozen public surface Twaha codes against.
 [package]
 name = "tgw-core"
 version = "0.1.0"
@@ -14,9 +14,9 @@ uuid.workspace = true
 time.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# Declared now so the whole team's build resolves; Muaz uses these for the real codec.
 ciborium.workspace = true
 lz4_flex.workspace = true
 chacha20poly1305.workspace = true
 raptorq.workspace = true
 rand.workspace = true
+toml.workspace = true
