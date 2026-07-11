@@ -167,6 +167,17 @@ pub async fn run_udp_listener(
 
         match frame {
             Frame::Data { bundle_id } => {
+                // PUBLIC-PORT HARDENING: authenticate the datagram under the session key BEFORE
+                // touching any per-bundle map. An off-key flood (random UUIDs, forged tags) is
+                // dropped here, so it can never create BundleReceiver/sources state — closing the
+                // unauthenticated memory-exhaustion vector on an internet-facing port. `absorb`
+                // re-checks the tag as defence in depth; the cost here is one HMAC over ~1 KB,
+                // far cheaper than a decoder slot, and a corrupt packet leaves any legitimate
+                // in-flight bundle's accumulated symbols untouched.
+                if !tgw_core::authenticate_data(dgram, &key) {
+                    tracing::debug!(%bundle_id, from = %src, "dropping unauthenticated DATA (no state created)");
+                    continue;
+                }
                 // Drive the per-bundle receiver. The borrow of `receivers` ends once `absorb`
                 // returns, so we can mutate `receivers` again in the outcome arms below.
                 sources.insert(bundle_id, src);
