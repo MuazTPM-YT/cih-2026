@@ -69,6 +69,22 @@ pub(crate) fn data_subkey(key: &Key) -> [u8; 32] {
     key.derive_subkey(DATA_INTEGRITY_LABEL)
 }
 
+/// Authenticate a raw DATA datagram under `key` without allocating any decoder state.
+///
+/// The gateway calls this at the datagram boundary on a public port: a datagram that is not a
+/// well-formed DATA frame, or whose integrity tag does not verify under the session key, is
+/// dropped **before** any per-bundle `BundleReceiver` is created — closing the unauthenticated
+/// state-exhaustion vector. Returns `false` (never panics/errors) for anything unauthenticated.
+#[must_use]
+pub fn authenticate_data(dgram: &[u8], key: &Key) -> bool {
+    match split_header(dgram) {
+        Ok((version, frame_type, _)) if version == WIRE_VERSION && frame_type == FRAME_DATA => {
+            verify_data_tag(dgram, &data_subkey(key)).is_ok()
+        }
+        _ => false,
+    }
+}
+
 /// Verify a DATA datagram's trailing integrity tag under `subkey`.
 ///
 /// Recomputes the truncated HMAC over the datagram minus its tag and compares in constant
@@ -481,6 +497,20 @@ mod tests {
             ),
             "a datagram tagged under a different PSK must not verify"
         );
+    }
+
+    #[test]
+    fn authenticate_data_gates_on_the_session_key() {
+        let key = Key::generate();
+        let subkey = data_subkey(&key);
+        let dgram = build_data_frame(Uuid::new_v4(), &[7u8; OTI_LEN], &[1, 2, 3, 4, 5], &subkey);
+        assert!(authenticate_data(&dgram, &key), "own-key DATA authenticates");
+        assert!(
+            !authenticate_data(&dgram, &Key::generate()),
+            "wrong key rejected"
+        );
+        assert!(!authenticate_data(b"\x01\x01junk", &key), "garbage rejected");
+        assert!(!authenticate_data(&[], &key), "empty rejected");
     }
 
     #[test]

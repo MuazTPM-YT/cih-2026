@@ -51,6 +51,6 @@ pub use pake::{
 };
 pub use model::{Bundle, BundlePayload, Component, Datagram, Measure, Priority, VitalsObservation};
 pub use wire::{
-    FRAME_DATA, FRAME_NACK, FRAME_RECEIPT, Frame, NackFrame, WIRE_VERSION, build_receipt,
-    encode_nack, parse_frame, verify_receipt,
+    FRAME_DATA, FRAME_NACK, FRAME_RECEIPT, Frame, NackFrame, WIRE_VERSION, authenticate_data,
+    build_receipt, encode_nack, parse_frame, verify_receipt,
 };
