@@ -28,3 +28,5 @@ toml.workspace = true
 tower = { version = "0.5", features = ["util"] } # ServiceExt::oneshot for handler tests
 serde_json.workspace = true
 tokio.workspace = true
+tgw-core.workspace = true # drive run_udp_listener end-to-end with real FEC frames
+uuid.workspace = true

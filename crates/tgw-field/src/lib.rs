@@ -7,7 +7,9 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod discovery;
 pub mod pacer;
 pub mod queue;
+pub mod relay;
 pub mod sender;
 pub mod vitals;

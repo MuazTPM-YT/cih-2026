@@ -79,6 +79,18 @@ impl Key {
     pub(crate) fn cipher(&self) -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new((&self.bytes).into())
     }
+
+    /// Derive a 256-bit subkey from this PSK for a distinct purpose, via HKDF-SHA256.
+    ///
+    /// `label` is the HKDF `info` string and MUST differ per purpose so subkeys never
+    /// collide across layers. The integrity-tag layer (`wire.rs`) uses this to obtain a MAC
+    /// key that is cryptographically independent of the raw XChaCha20-Poly1305 key used by
+    /// the envelope/receipt AEAD — no key or nonce material is shared between the two.
+    pub(crate) fn derive_subkey(&self, label: &[u8]) -> [u8; KEY_LEN] {
+        // Fixed, non-secret salt binds all derivations to this protocol's key schedule.
+        const HKDF_SALT: &[u8] = b"tgw/psk-schedule/v1";
+        crate::mac::hkdf_sha256(HKDF_SALT, &self.bytes, label)
+    }
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -130,6 +142,27 @@ mod tests {
             Key::from_hex(&"ab".repeat(16)).is_err(),
             "short keys must be rejected"
         );
+    }
+
+    #[test]
+    fn derive_subkey_is_deterministic_and_label_separated() {
+        let key = Key::generate();
+        let a1 = key.derive_subkey(b"tgw/data-integrity/v1");
+        let a2 = key.derive_subkey(b"tgw/data-integrity/v1");
+        let b = key.derive_subkey(b"tgw/some-other-purpose/v1");
+        assert_eq!(a1, a2, "same key + label must reproduce the same subkey");
+        assert_ne!(
+            a1, b,
+            "different labels must yield different subkeys (domain separation)"
+        );
+    }
+
+    #[test]
+    fn derive_subkey_depends_on_the_key() {
+        let label = b"tgw/data-integrity/v1";
+        let one = Key::generate().derive_subkey(label);
+        let two = Key::generate().derive_subkey(label);
+        assert_ne!(one, two, "distinct PSKs must derive distinct subkeys");
     }
 
     #[test]

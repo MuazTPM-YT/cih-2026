@@ -47,6 +47,7 @@ fn seeded_state() -> (StoreState, Uuid, Uuid) {
         .complete_vitals(
             vitals_id,
             &[tgw_fhir::to_fhir_json(&obs)],
+            &[vec![]],
             "2026-07-11T14:03:22Z",
         )
         .expect("persist vitals");

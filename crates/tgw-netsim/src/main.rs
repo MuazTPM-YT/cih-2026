@@ -16,6 +16,9 @@ struct Cli {
     /// Per-packet drop probability, 0.0..=1.0.
     #[arg(long, default_value_t = 0.25)]
     loss: f64,
+    /// Per-packet corruption probability for survivors, 0.0..=1.0 (single-bit flip).
+    #[arg(long, default_value_t = 0.0)]
+    corrupt: f64,
     /// How often a burst-loss episode begins, in milliseconds.
     #[arg(long, default_value_t = 5000)]
     burst_every_ms: u64,
@@ -46,6 +49,7 @@ async fn main() -> Result<()> {
 
     let cfg = NetsimConfig {
         loss: cli.loss,
+        corrupt: cli.corrupt,
         burst_every: Duration::from_millis(cli.burst_every_ms),
         burst_len: Duration::from_millis(cli.burst_len_ms),
         rate_bps: cli.rate,

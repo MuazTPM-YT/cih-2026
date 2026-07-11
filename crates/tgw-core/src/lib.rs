@@ -32,11 +32,12 @@ mod envelope;
 mod error;
 mod fec;
 mod key;
+mod mac;
 mod model;
 mod wire;
 
 pub use config::{
-    Config, CryptoConfig, FecConfig, LinkConfig, MediaConfig, NetConfig, RetryConfig,
+    Config, CryptoConfig, FecConfig, LinkConfig, MediaConfig, NetConfig, RelayConfig, RetryConfig,
 };
 pub use envelope::{open_envelope, seal_bundle};
 pub use error::CoreError;

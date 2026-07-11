@@ -64,21 +64,28 @@ pub struct BundleSender {
     /// Per source block: source symbol count (for burst sizing).
     source_symbols: Vec<u32>,
     overhead_factor: f32,
+    /// DATA-frame integrity subkey (HKDF-derived from the PSK) applied to every symbol.
+    data_subkey: [u8; 32],
 }
 
 impl BundleSender {
     /// Seal `bundle` under `key` and prepare the RaptorQ encoder.
     pub fn new(bundle: &Bundle, key: &Key, cfg: &FecConfig) -> Result<Self, CoreError> {
         let envelope = seal_bundle(bundle, key)?;
-        Self::from_envelope(bundle.id, &envelope, cfg)
+        Self::from_envelope(bundle.id, &envelope, key, cfg)
     }
 
     /// Prepare a sender from an **already-sealed** envelope (the store-and-forward
     /// resume path: the redb queue holds sealed envelopes at rest, and a re-burst after
     /// a crash must not re-encrypt).
+    ///
+    /// `key` is still required here — not to decrypt the envelope (it stays sealed) but to
+    /// derive the DATA-frame integrity subkey so re-bursts carry valid tags. (Contract 1
+    /// signature change, flagged: `key` argument added for the integrity layer.)
     pub fn from_envelope(
         bundle_id: Uuid,
         envelope: &[u8],
+        key: &Key,
         cfg: &FecConfig,
     ) -> Result<Self, CoreError> {
         if cfg.symbol_size < 64 {
@@ -106,6 +113,7 @@ impl BundleSender {
             source_symbols,
             encoder,
             overhead_factor: cfg.overhead_factor,
+            data_subkey: wire::data_subkey(key),
         };
         // Source symbol counts per block, derived from actual source packets — exact,
         // no re-implementation of the RFC 6330 partition function on the send side.
@@ -196,7 +204,12 @@ impl BundleSender {
     }
 
     fn frame(&self, packet: &EncodingPacket) -> Datagram {
-        wire::build_data_frame(self.bundle_id, &self.oti_bytes, &packet.serialize())
+        wire::build_data_frame(
+            self.bundle_id,
+            &self.oti_bytes,
+            &packet.serialize(),
+            &self.data_subkey,
+        )
     }
 }
 
@@ -204,6 +217,8 @@ impl BundleSender {
 /// (Contract 1) — the gateway keys a map of these by bundle id.
 pub struct BundleReceiver {
     key: Key,
+    /// DATA-frame integrity subkey (HKDF-derived from `key`), checked per datagram.
+    data_subkey: [u8; 32],
     state: State,
 }
 
@@ -236,18 +251,29 @@ impl BundleReceiver {
     /// team as a Contract 1 constructor change, `absorb`'s signature is unchanged.)
     #[must_use]
     pub fn new(key: Key) -> Self {
+        let data_subkey = wire::data_subkey(&key);
         BundleReceiver {
             key,
+            data_subkey,
             state: State::Idle,
         }
     }
 
     /// Feed one datagram; drive the decode state machine.
     ///
-    /// Errors: [`CoreError::MalformedFrame`] for non-DATA or corrupt frames (drop and
-    /// carry on), [`CoreError::Crypto`] if the completed envelope fails authentication
-    /// (drop the whole bundle — never partial-accept).
+    /// The per-datagram integrity tag is verified **first**, before any state is touched, so
+    /// a corrupted or wrong-PSK datagram is rejected without contributing to
+    /// `symbols_received` or reaching the RaptorQ decoder.
+    ///
+    /// Errors: [`CoreError::MalformedFrame`] for non-DATA, corrupt, or failed-integrity
+    /// frames (drop the datagram and carry on — the bundle's accumulated symbols are kept),
+    /// [`CoreError::Crypto`] if the completed envelope fails authentication (drop the whole
+    /// bundle — never partial-accept).
     pub fn absorb(&mut self, dgram: &[u8]) -> Result<Absorb, CoreError> {
+        // Integrity gate: reject corruption before it can poison the decode or inflate the
+        // symbol count. Runs ahead of every state transition, including the completed-bundle
+        // idempotent-receipt path, so a corrupt duplicate can never disturb a done bundle.
+        wire::verify_data_tag(dgram, &self.data_subkey)?;
         let parts = wire::parse_data_frame(dgram)?;
         match &mut self.state {
             State::Done(bundle) => {
@@ -462,7 +488,7 @@ mod tests {
             Err(e) => panic!("seal must succeed: {e}"),
         };
 
-        let mut sender = match BundleSender::from_envelope(bundle.id, &envelope, &fec()) {
+        let mut sender = match BundleSender::from_envelope(bundle.id, &envelope, &key, &fec()) {
             Ok(s) => s,
             Err(e) => panic!("resume sender must build: {e}"),
         };
@@ -481,9 +507,12 @@ mod tests {
             Ok(d) => d,
             Err(e) => panic!("encode must succeed: {e}"),
         };
-        // Datagram size bound: header(2) + uuid(16) + OTI(12) + PayloadId(4) + symbol.
+        // Datagram size bound: header(2) + uuid(16) + OTI(12) + PayloadId(4) + symbol + tag(8).
         for dgram in &datagrams {
-            assert!(dgram.len() <= 2 + 16 + 12 + 4 + 1100, "oversized datagram");
+            assert!(
+                dgram.len() <= 2 + 16 + 12 + 4 + 1100 + 8,
+                "oversized datagram"
+            );
         }
 
         let mut receiver = BundleReceiver::new(key);
@@ -537,6 +566,39 @@ mod tests {
             decoded = absorb_all(&mut receiver, &surviving_repairs);
         }
         assert_eq!(decoded, Some(bundle));
+    }
+
+    #[test]
+    fn hostile_nack_is_bounded_and_panic_free() {
+        // NACK frames are unauthenticated (only RECEIPTs carry an AEAD tag), and the bundle id
+        // that gates the repair path travels in cleartext, so any on-path attacker can forge a
+        // NACK for an in-flight bundle. A forged `needed = u32::MAX` must NOT overflow (debug
+        // panic) or attempt to mint billions of symbols (release memory/CPU exhaustion) — the
+        // wire value must be clamped to what a block could ever need.
+        let mut rng = StdRng::seed_from_u64(SEED + 10);
+        let key = Key::generate();
+        let bundle = test_bundle(10_000, &mut rng);
+        let mut sender = match BundleSender::new(&bundle, &key, &fec()) {
+            Ok(s) => s,
+            Err(e) => panic!("sender must build: {e}"),
+        };
+        let source = sender.total_source_symbols();
+
+        let hostile = NackFrame {
+            bundle_id: sender.bundle_id(),
+            needed: vec![u32::MAX],
+        };
+        let repairs = sender.respond_to_nack(&hostile);
+
+        assert!(
+            (repairs.len() as u32) <= source + NACK_MARGIN,
+            "a hostile NACK must be clamped to ~the block's source count, got {} for {source} source symbols",
+            repairs.len()
+        );
+        assert!(
+            !repairs.is_empty(),
+            "a legitimate-looking NACK still gets a bounded, useful response"
+        );
     }
 
     #[test]
@@ -633,7 +695,12 @@ mod tests {
     }
 
     #[test]
-    fn wrong_key_poisons_receiver_not_partial_data() {
+    fn wrong_key_is_rejected_at_the_integrity_gate() {
+        // With the DATA-frame integrity tag, a wrong PSK derives a different subkey, so every
+        // datagram now fails the integrity check (MalformedFrame) *before* RaptorQ or AEAD —
+        // stronger and earlier than the old behavior (which reached AEAD and returned Crypto).
+        // The AEAD-failure-after-reconstruction path is covered by envelope.rs and the
+        // gateway's tampered-ciphertext test (Fix 1b).
         let mut rng = StdRng::seed_from_u64(SEED + 3);
         let bundle = test_bundle(8_000, &mut rng);
         let datagrams = match encode_bundle(&bundle, &Key::generate(), &fec()) {
@@ -642,23 +709,147 @@ mod tests {
         };
 
         let mut receiver = BundleReceiver::new(Key::generate()); // different key
-        let mut got_crypto_error = false;
         for dgram in &datagrams {
             match receiver.absorb(dgram) {
                 Ok(Absorb::Complete(_)) => panic!("wrong key must never yield a bundle"),
+                Ok(_) => panic!("wrong-PSK datagrams must not be accepted"),
+                Err(CoreError::MalformedFrame) => {}
+                Err(e) => panic!("expected integrity rejection, got {e}"),
+            }
+        }
+        assert_eq!(
+            receiver.symbols_received(),
+            0,
+            "no wrong-PSK datagram may count toward progress"
+        );
+        assert!(!receiver.is_complete());
+    }
+
+    #[test]
+    fn aead_backstop_fires_when_corrupt_symbols_carry_valid_integrity_tags() {
+        // The integrity gate (1a) normally rejects corruption before decode. This test
+        // deliberately BYPASSES it — re-tagging corrupted symbols with the correct subkey, as
+        // a codec fault or a PSK-holding attacker could — to prove the AEAD envelope is still
+        // a hard backstop: a reconstruction from corrupt symbols authenticates as failure
+        // (Crypto, State::Failed) and never surfaces a bundle. This is the receiving-end
+        // guarantee behind Fix 1b at the core layer.
+        let mut rng = StdRng::seed_from_u64(SEED + 9);
+        let key = Key::generate();
+        let bundle = test_bundle(6_000, &mut rng);
+        let cfg = FecConfig {
+            symbol_size: 1100,
+            overhead_factor: 2.0,
+        };
+        let datagrams = match encode_bundle(&bundle, &key, &cfg) {
+            Ok(d) => d,
+            Err(e) => panic!("encode must succeed: {e}"),
+        };
+        let subkey = wire::data_subkey(&key);
+
+        // Corrupt each symbol's payload (past the 4-byte PayloadId so ESIs stay intact) and
+        // re-tag so it sails through the integrity gate.
+        let tampered: Vec<Datagram> = datagrams
+            .iter()
+            .map(|dg| {
+                let parts = wire::parse_data_frame(dg).expect("own datagram parses");
+                let mut packet = parts.packet.to_vec();
+                let idx = 4 + (packet.len() - 4) / 2;
+                packet[idx] ^= 0xFF;
+                wire::build_data_frame(parts.bundle_id, &parts.oti, &packet, &subkey)
+            })
+            .collect();
+
+        let mut receiver = BundleReceiver::new(key);
+        let mut saw_crypto = false;
+        for dg in &tampered {
+            match receiver.absorb(dg) {
+                Ok(Absorb::Complete(_)) => {
+                    panic!("a corrupt reconstruction must never surface a bundle")
+                }
                 Ok(_) => {}
                 Err(CoreError::Crypto) => {
-                    got_crypto_error = true;
+                    saw_crypto = true;
                     break;
+                }
+                Err(CoreError::MalformedFrame) => {
+                    panic!("re-tagged datagrams must pass the integrity gate")
                 }
                 Err(e) => panic!("unexpected error: {e}"),
             }
         }
         assert!(
-            got_crypto_error,
-            "completion under a wrong key must fail closed"
+            saw_crypto,
+            "a completed decode of corrupt symbols must fail AEAD (Crypto), not partial-accept"
         );
         assert!(!receiver.is_complete());
+    }
+
+    #[test]
+    fn bitflipped_datagrams_are_rejected_before_absorb_and_do_not_count() {
+        // Radio corruption that survives the UDP checksum: flip a symbol bit on some
+        // datagrams. Each must be rejected at the integrity gate (MalformedFrame), must not
+        // increment symbols_received, and must not poison the decode — the clean survivors
+        // alone must still reconstruct the bundle byte-for-byte.
+        let mut rng = StdRng::seed_from_u64(SEED + 8);
+        let key = Key::generate();
+        let bundle = test_bundle(20_000, &mut rng);
+        // 2x overhead so the clean ~2/3 of a single burst decodes without a NACK round (the
+        // NACK/repair path is exercised separately); this test isolates integrity filtering.
+        let cfg = FecConfig {
+            symbol_size: 1100,
+            overhead_factor: 2.0,
+        };
+        let mut sender = match BundleSender::new(&bundle, &key, &cfg) {
+            Ok(s) => s,
+            Err(e) => panic!("sender must build: {e}"),
+        };
+        let burst = sender.initial_burst();
+
+        let mut receiver = BundleReceiver::new(key);
+        let mut decoded = None;
+        let mut clean_absorbed = 0u32;
+        let mut corrupt_rejected = 0u32;
+
+        for (i, dgram) in burst.iter().enumerate() {
+            // Corrupt roughly every third datagram by flipping a symbol-region bit.
+            if i % 3 == 1 {
+                let before = receiver.symbols_received();
+                let mut corrupt = dgram.clone();
+                // A byte solidly inside the symbol (past header+uuid+oti+payload-id).
+                let target = 2 + 16 + 12 + 6;
+                corrupt[target] ^= 0x01;
+                match receiver.absorb(&corrupt) {
+                    Err(CoreError::MalformedFrame) => corrupt_rejected += 1,
+                    other => panic!("corrupt datagram must be rejected, got {other:?}"),
+                }
+                assert_eq!(
+                    receiver.symbols_received(),
+                    before,
+                    "a rejected datagram must not advance symbols_received"
+                );
+            } else {
+                match receiver.absorb(dgram) {
+                    Ok(Absorb::Complete(b)) => {
+                        decoded = Some(b);
+                        break;
+                    }
+                    Ok(_) => clean_absorbed += 1,
+                    Err(e) => panic!("clean datagram must absorb: {e}"),
+                }
+            }
+        }
+
+        assert!(
+            corrupt_rejected > 0,
+            "the test must actually inject corruption"
+        );
+        assert!(clean_absorbed > 0, "clean symbols must have been absorbed");
+        // At 1.4x overhead the clean ~2/3 of the burst is enough to decode.
+        assert_eq!(
+            decoded,
+            Some(bundle),
+            "clean survivors alone must reconstruct the exact bundle"
+        );
     }
 
     #[test]

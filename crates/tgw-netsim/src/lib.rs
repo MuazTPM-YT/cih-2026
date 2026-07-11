@@ -19,6 +19,11 @@ use tokio::time::{Instant, sleep};
 pub struct NetsimConfig {
     /// Random per-packet drop probability, 0.0..=1.0 (e.g. 0.25 for 25% loss).
     pub loss: f64,
+    /// Random per-packet corruption probability, 0.0..=1.0. A *surviving* datagram is chosen
+    /// with this probability to have a single bit flipped — modelling a datagram that reaches
+    /// the receiver but arrives damaged. This is what the gateway's integrity tag must reject
+    /// before RaptorQ; a pure-loss link never produces it.
+    pub corrupt: f64,
     /// How often a burst-loss episode begins.
     pub burst_every: Duration,
     /// How long each burst-loss episode lasts (all packets dropped during it).
@@ -35,6 +40,7 @@ impl Default for NetsimConfig {
     fn default() -> Self {
         Self {
             loss: DEFAULT_LOSS,
+            corrupt: DEFAULT_CORRUPT,
             burst_every: DEFAULT_BURST_EVERY,
             burst_len: DEFAULT_BURST_LEN,
             rate_bps: DEFAULT_RATE_BPS,
@@ -50,6 +56,9 @@ impl NetsimConfig {
         if !(0.0..=1.0).contains(&self.loss) {
             anyhow::bail!("netsim loss must be in 0.0..=1.0");
         }
+        if !(0.0..=1.0).contains(&self.corrupt) {
+            anyhow::bail!("netsim corrupt must be in 0.0..=1.0");
+        }
         if self.burst_every.is_zero() {
             anyhow::bail!("netsim burst_every must be non-zero");
         }
@@ -62,6 +71,8 @@ impl NetsimConfig {
 
 /// Default random loss rate used by the deterministic evidence harness.
 const DEFAULT_LOSS: f64 = 0.25;
+/// Default corruption rate: off, so a plain lossy link stays a plain lossy link.
+const DEFAULT_CORRUPT: f64 = 0.0;
 /// Time between deterministic burst-loss windows.
 const DEFAULT_BURST_EVERY: Duration = Duration::from_secs(5);
 /// Duration of each deterministic burst-loss window.
@@ -97,6 +108,7 @@ pub async fn run_proxy(
         .context("netsim: bind forwarder")?;
 
     let mut loss = LossModel::new(&cfg);
+    let mut corruptor = Corruptor::new(&cfg);
     let mut pacer = Pacer::new(cfg.rate_bps);
     // Separate, seeded RNG for jitter so it does not perturb the drop sequence.
     let mut jitter_rng = StdRng::seed_from_u64(cfg.seed.wrapping_add(1));
@@ -114,6 +126,11 @@ pub async fn run_proxy(
                 if loss.decide(elapsed) {
                     tracing::trace!(bytes = n, "netsim: dropping forward datagram");
                     continue;
+                }
+                // A survivor may still arrive damaged. The gateway's integrity tag must reject
+                // this before RaptorQ absorbs it; here we only inject the damage.
+                if corruptor.corrupt(&mut field_buf[..n]) {
+                    tracing::trace!(bytes = n, "netsim: corrupted forward datagram");
                 }
                 let packet_bits = u64::try_from(n.saturating_mul(8)).unwrap_or(u64::MAX);
                 let pace_delay = pacer.schedule(elapsed, packet_bits);
@@ -194,6 +211,40 @@ impl LossModel {
         }
         let phase = elapsed.as_nanos() % every_ns;
         phase < self.cfg.burst_len.as_nanos()
+    }
+}
+
+/// Deterministic per-packet corruption policy: flip a single bit in a fraction of survivors.
+///
+/// # Semantics (implement EXACTLY this — the tests depend on it)
+/// For each datagram, draw once with probability `corrupt` using a `StdRng` seeded from
+/// `cfg.seed.wrapping_add(2)` (a dedicated stream, so corruption never perturbs the drop or
+/// jitter sequences). On a hit, flip exactly one bit at a pseudo-random byte/bit position, so
+/// the datagram is guaranteed to differ while keeping its length. An empty datagram is a no-op.
+/// Returns `true` iff the datagram was modified.
+pub struct Corruptor {
+    prob: f64,
+    rng: StdRng,
+}
+
+impl Corruptor {
+    /// Build a corruptor from the config (seeds a dedicated RNG stream from `cfg.seed`).
+    pub fn new(cfg: &NetsimConfig) -> Self {
+        Self {
+            prob: cfg.corrupt,
+            rng: StdRng::seed_from_u64(cfg.seed.wrapping_add(2)),
+        }
+    }
+
+    /// Possibly flip one bit of `packet` in place. `true` = the datagram was modified.
+    pub fn corrupt(&mut self, packet: &mut [u8]) -> bool {
+        if packet.is_empty() || !self.rng.gen_bool(self.prob) {
+            return false;
+        }
+        let byte = self.rng.gen_range(0..packet.len());
+        let bit = self.rng.gen_range(0..8u32);
+        packet[byte] ^= 1u8 << bit; // single-bit flip ⇒ the byte always changes
+        true
     }
 }
 
