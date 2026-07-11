@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Router;
@@ -26,6 +27,7 @@ use tgw_core::{
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::net::UdpSocket;
+use tokio::time::timeout;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
@@ -98,34 +100,59 @@ pub async fn run_http_server_store(addr: SocketAddr, state: StoreState) -> anyho
     Ok(())
 }
 
-/// Bind the UDP socket, decode incoming bundles, emit FHIR + receipts.
+/// Bind the UDP socket, decode incoming bundles, emit FHIR + receipts, and drive the
+/// gateway-side NACK/repair loop.
 ///
-/// Loop: `recv_from` → [`tgw_core::parse_frame`] → for `DATA` frames, drive the matching
-/// [`tgw_core::BundleReceiver`] with [`tgw_core::BundleReceiver::absorb`]. On
-/// [`tgw_core::Absorb::Complete`], dedup against the [`Store`]: a brand-new bundle is persisted
-/// (FHIR JSON for vitals, raw bytes for images) and marked delivered; a re-burst of an
-/// already-delivered bundle is logged but not re-stored (idempotent). In both cases a
-/// `DELIVERED` receipt is owed back to the field (Phase E).
+/// Loop: `recv_from` (bounded by `nack_timeout`) → [`tgw_core::parse_frame`] → for `DATA`
+/// frames, drive the matching [`tgw_core::BundleReceiver`] with
+/// [`tgw_core::BundleReceiver::absorb`]. On [`tgw_core::Absorb::Complete`], dedup against the
+/// [`Store`]: a brand-new bundle is persisted (FHIR JSON for vitals, raw bytes for images)
+/// and marked delivered; a re-burst of an already-delivered bundle is logged but not
+/// re-stored (idempotent). In both cases a `DELIVERED` receipt is sent back to the field.
 ///
-/// NOTE: [`tgw_core::BundleReceiver::absorb`] and [`tgw_core::parse_frame`] are `todo!()` on
-/// Muaz's branch; a live decode panics until his core lands — expected at the H6 sync. The
-/// store/dedup path is real and unit-tested; the receipt send is `BLOCKED(PHASE-E)` until Muaz's
-/// `build_receipt` + `Key::from_file` exist. This path is correct-by-construction and
-/// compiles + clippy-clean today.
-pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> anyhow::Result<()> {
+/// Decode-stall recovery: `recv_from` is wrapped in a `nack_timeout` window. When it
+/// elapses with in-flight bundles still incomplete, the gateway mints a
+/// [`tgw_core::BundleReceiver::build_nack`] for each and sends it to that bundle's remembered
+/// source address — the gateway-initiated repair loop from the architecture. The field's own
+/// silence re-burst remains a backstop; both are idempotent under the fountain code.
+pub async fn run_udp_listener(
+    addr: SocketAddr,
+    store: Arc<Store>,
+    key: Key,
+    nack_timeout: Duration,
+) -> anyhow::Result<()> {
     let sock = UdpSocket::bind(addr)
         .await
         .context("gateway: bind UDP listener")?;
     tracing::info!(%addr, "gateway UDP listening");
 
     let mut receivers: HashMap<Uuid, BundleReceiver> = HashMap::new();
+    // Where to send NACKs/receipts for each in-flight bundle (its last-seen field source).
+    let mut sources: HashMap<Uuid, SocketAddr> = HashMap::new();
     let mut buf = vec![0u8; MAX_DATAGRAM];
 
     loop {
-        let (n, src) = sock
-            .recv_from(&mut buf)
-            .await
-            .context("gateway: recv_from")?;
+        let (n, src) = match timeout(nack_timeout, sock.recv_from(&mut buf)).await {
+            Ok(result) => result.context("gateway: recv_from")?,
+            Err(_elapsed) => {
+                // Stall timer: nudge every incomplete in-flight bundle with a fresh NACK.
+                for (bundle_id, receiver) in &receivers {
+                    let Some(nack) = receiver.build_nack() else {
+                        continue;
+                    };
+                    if nack.needed.iter().sum::<u32>() == 0 {
+                        continue;
+                    }
+                    if let Some(dst) = sources.get(bundle_id) {
+                        sock.send_to(&encode_nack(&nack), *dst)
+                            .await
+                            .context("gateway: send stall NACK")?;
+                        tracing::info!(%bundle_id, "gateway: decode stalled, NACK sent");
+                    }
+                }
+                continue;
+            }
+        };
         let dgram = &buf[..n];
 
         let frame = match parse_frame(dgram) {
@@ -140,6 +167,7 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
             Frame::Data { bundle_id } => {
                 // Drive the per-bundle receiver. The borrow of `receivers` ends once `absorb`
                 // returns, so we can mutate `receivers` again in the outcome arms below.
+                sources.insert(bundle_id, src);
                 let (outcome, symbols_received, symbols_needed) = {
                     let receiver = receivers
                         .entry(bundle_id)
@@ -163,6 +191,7 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
                     }
                     Ok(Absorb::Complete(bundle)) => {
                         receivers.remove(&bundle_id);
+                        sources.remove(&bundle_id);
                         if handle_complete(&store, &bundle)? {
                             let receipt = build_receipt(bundle.id, &key);
                             sock.send_to(&receipt, src)
@@ -184,6 +213,7 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
                     Err(e) => {
                         tracing::warn!(%bundle_id, error = %e, "gateway: absorb failed, dropping bundle");
                         receivers.remove(&bundle_id);
+                        sources.remove(&bundle_id);
                     }
                 }
             }

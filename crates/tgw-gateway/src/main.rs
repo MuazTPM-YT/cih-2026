@@ -53,7 +53,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the UDP decode path and the HTTP API concurrently; neither blocks the other. If
     // either errors (e.g. UDP bind fails), `try_join!` cancels the other and propagates.
-    let udp = tgw_gateway::run_udp_listener(listen, Arc::clone(&store), key);
+    let nack_timeout = std::time::Duration::from_millis(config.retry.nack_timeout_ms);
+    let udp = tgw_gateway::run_udp_listener(listen, Arc::clone(&store), key, nack_timeout);
     let http = tgw_gateway::run_http_server_store(http_addr, state);
     let ((), ()) = tokio::try_join!(udp, http)?;
     Ok(())
