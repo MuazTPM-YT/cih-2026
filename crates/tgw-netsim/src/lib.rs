@@ -194,7 +194,6 @@ impl LossModel {
         let phase = elapsed.as_nanos() % every_ns;
         phase < self.cfg.burst_len.as_nanos()
     }
-
 }
 
 /// Token-bucket pacer that serialises datagrams at a fixed bits-per-second cap.

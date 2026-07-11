@@ -30,6 +30,7 @@ use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 mod store;
+/// Redb-backed persistence for delivered bundles and gateway queue state.
 pub use store::Store;
 
 /// Maximum UDP datagram the gateway buffers (fits a 65535-byte IP payload).
@@ -164,7 +165,9 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
                         receivers.remove(&bundle_id);
                         if handle_complete(&store, &bundle)? {
                             let receipt = build_receipt(bundle.id, &key);
-                            sock.send_to(&receipt, src).await.context("gateway: send receipt")?;
+                            sock.send_to(&receipt, src)
+                                .await
+                                .context("gateway: send receipt")?;
                             store.mark_receipt_sent(bundle.id)?;
                         }
                     }
@@ -174,7 +177,9 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
                             needed_blocks = nack.needed.len(),
                             "gateway: decode stalled, NACK queued"
                         );
-                        sock.send_to(&encode_nack(&nack), src).await.context("gateway: send NACK")?;
+                        sock.send_to(&encode_nack(&nack), src)
+                            .await
+                            .context("gateway: send NACK")?;
                     }
                     Err(e) => {
                         tracing::warn!(%bundle_id, error = %e, "gateway: absorb failed, dropping bundle");
@@ -204,10 +209,7 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
 /// delivered in the [`Store`].
 fn handle_complete(store: &Store, bundle: &Bundle) -> anyhow::Result<bool> {
     let id = bundle.id;
-    let already_delivered = match store.is_delivered(id) {
-        Ok(d) => d,
-        Err(e) => return Err(e),
-    };
+    let already_delivered = store.is_delivered(id)?;
     if already_delivered {
         tracing::info!(%id, "gateway: duplicate re-burst of an already-delivered bundle");
         // The bundle is owed a fresh receipt (idempotent), but no second record is written.
@@ -228,7 +230,11 @@ fn persist_bundle(store: &Store, bundle: &Bundle) -> anyhow::Result<()> {
             let fhir: Vec<_> = observations.iter().map(tgw_fhir::to_fhir_json).collect();
             store.complete_vitals(bundle.id, &fhir, &received_at)?;
         }
-        BundlePayload::Image { mime, data, patient_id } => {
+        BundlePayload::Image {
+            mime,
+            data,
+            patient_id,
+        } => {
             store.complete_image(bundle.id, mime, data, patient_id, &received_at)?;
         }
     }
@@ -363,22 +369,24 @@ fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
     let mut items = Vec::new();
     for (id, received_at, kind) in rows {
         match kind {
-            "vitals" => for fhir_json in store.get_observations(id)?.unwrap_or_default() {
-                let patient_id = fhir_json
-                    .get("subject")
-                    .and_then(|subject| subject.get("reference"))
-                    .and_then(|reference| reference.as_str())
-                    .and_then(|reference| reference.strip_prefix("Patient/"))
-                    .unwrap_or_default();
-                items.push(json!({
-                    "bundle_id": id.to_string(),
-                    "received_at": received_at,
-                    "patient_id": patient_id,
-                    "kind": "vitals",
-                    "summary": format_summary(&fhir_json),
-                    "fhir": fhir_json,
-                }));
-            },
+            "vitals" => {
+                for fhir_json in store.get_observations(id)?.unwrap_or_default() {
+                    let patient_id = fhir_json
+                        .get("subject")
+                        .and_then(|subject| subject.get("reference"))
+                        .and_then(|reference| reference.as_str())
+                        .and_then(|reference| reference.strip_prefix("Patient/"))
+                        .unwrap_or_default();
+                    items.push(json!({
+                        "bundle_id": id.to_string(),
+                        "received_at": received_at,
+                        "patient_id": patient_id,
+                        "kind": "vitals",
+                        "summary": format_summary(&fhir_json),
+                        "fhir": fhir_json,
+                    }));
+                }
+            }
             "image" => items.push(json!({
                 "bundle_id": id.to_string(),
                 "received_at": received_at,

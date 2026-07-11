@@ -8,7 +8,7 @@
 
 use time::format_description::well_known::Rfc3339;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tgw_core::{Component, Measure, VitalsObservation};
 
 /// LOINC coding system URL (`code.coding[].system` for clinical codes).

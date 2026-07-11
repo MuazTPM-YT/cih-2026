@@ -201,7 +201,8 @@ impl Store {
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(QUEUE)?;
-            let entry = table.get(id.as_u128())?
+            let entry = table
+                .get(id.as_u128())?
                 .map(|value| serde_json::from_str::<QueueEntry>(value.value()))
                 .transpose()
                 .context("parse stored queue entry")?
@@ -298,7 +299,9 @@ impl Store {
     pub fn get_image_patient(&self, id: Uuid) -> anyhow::Result<Option<String>> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(IMAGE_PATIENT)?;
-        Ok(table.get(id.as_u128())?.map(|value| value.value().to_string()))
+        Ok(table
+            .get(id.as_u128())?
+            .map(|value| value.value().to_string()))
     }
 
     fn complete_bundle(
@@ -313,22 +316,25 @@ impl Store {
             let mut delivered = txn.open_table(DELIVERED)?;
             delivered.insert(id.as_u128(), received_at)?;
             let mut queue = txn.open_table(QUEUE)?;
-            let existing = queue.get(id.as_u128())?
+            let existing = queue
+                .get(id.as_u128())?
                 .map(|value| serde_json::from_str::<QueueEntry>(value.value()))
                 .transpose()
                 .context("parse queue entry")?;
-            let entry = existing.map(|entry| QueueEntry {
-                state: "complete".to_string(),
-                completed_at: Some(received_at.to_string()),
-                ..entry
-            }).unwrap_or(QueueEntry {
-                bundle_id: id,
-                state: "complete".to_string(),
-                symbols_received: 0,
-                symbols_needed: 0,
-                first_seen: received_at.to_string(),
-                completed_at: Some(received_at.to_string()),
-            });
+            let entry = existing
+                .map(|entry| QueueEntry {
+                    state: "complete".to_string(),
+                    completed_at: Some(received_at.to_string()),
+                    ..entry
+                })
+                .unwrap_or(QueueEntry {
+                    bundle_id: id,
+                    state: "complete".to_string(),
+                    symbols_received: 0,
+                    symbols_needed: 0,
+                    first_seen: received_at.to_string(),
+                    completed_at: Some(received_at.to_string()),
+                });
             let json = serde_json::to_string(&entry).context("serialize queue entry")?;
             queue.insert(id.as_u128(), json.as_str())?;
         }
@@ -441,11 +447,20 @@ mod tests {
             .expect("receiving");
         s.complete_vitals(
             id,
-            &[serde_json::json!({"id":"first"}), serde_json::json!({"id":"second"})],
+            &[
+                serde_json::json!({"id":"first"}),
+                serde_json::json!({"id":"second"}),
+            ],
             "2026-07-11T14:03:22Z",
         )
         .expect("complete");
-        assert_eq!(s.get_observations(id).expect("read").expect("present").len(), 2);
+        assert_eq!(
+            s.get_observations(id)
+                .expect("read")
+                .expect("present")
+                .len(),
+            2
+        );
         s.mark_receipt_sent(id).expect("receipt");
         let queue = s.list_queue().expect("queue");
         assert_eq!(queue[0].state, "receipt_sent");
@@ -457,14 +472,11 @@ mod tests {
     fn complete_image_keeps_patient_identifier() {
         let s = fresh_store("image_patient");
         let id = Uuid::new_v4();
-        s.complete_image(
-            id,
-            "image/jpeg",
-            &[0xAB],
-            "P-1023",
-            "2026-07-11T14:03:22Z",
-        )
-        .expect("complete image");
-        assert_eq!(s.get_image_patient(id).expect("patient"), Some("P-1023".into()));
+        s.complete_image(id, "image/jpeg", &[0xAB], "P-1023", "2026-07-11T14:03:22Z")
+            .expect("complete image");
+        assert_eq!(
+            s.get_image_patient(id).expect("patient"),
+            Some("P-1023".into())
+        );
     }
 }
