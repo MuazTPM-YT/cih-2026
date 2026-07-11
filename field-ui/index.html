@@ -1,228 +1,421 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#181818">
-  <title>Field Capture</title>
+  <meta name="theme-color" content="#FFFFFF">
+  <title>Medical Data Capture</title>
   <link rel="stylesheet" href="app.css">
 </head>
+
 <body>
 
   <div class="app-shell">
 
-    <!-- Top bar -->
+    <!-- Header -->
     <header class="app-header">
-      <h1 class="title">
-        <svg class="title-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
-        Field capture
-      </h1>
-      <div class="status-badge" id="global-status">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path><path d="M10.71 5.05A16 16 0 0 1 22.58 9"></path><path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></svg>
-        queued for send
-      </div>
+      <h1 class="page-title">Medical Data Capture</h1>
     </header>
 
-    <!-- Form wraps both columns so the Send button submits correctly -->
+    <!-- Demo buttons -->
+    <div class="demo-bar">
+      <button type="button" class="demo-btn demo-minor" onclick="loadDemo(1)">Demo 1: Healthy Adult</button>
+      <button type="button" class="demo-btn demo-critical" onclick="loadDemo(2)">Demo 2: Critical Adult</button>
+      <button type="button" class="demo-btn demo-critical" onclick="loadDemo(3)">Demo 3: Critical Child</button>
+    </div>
+
+    <!-- Two-column grid (form wraps both) -->
     <form id="capture-form" class="app-grid" novalidate autocomplete="off">
 
-      <!-- ================= LEFT COLUMN: PATIENT + PHOTO + VITALS ================= -->
-      <section class="panel panel-primary" aria-label="Patient capture form">
+      <!-- ============ LEFT COLUMN ============ -->
+      <div class="col-primary">
 
-        <!-- Patient identity section -->
-        <fieldset class="field-section">
-          <legend class="section-legend">Patient</legend>
+        <!-- Patient Information -->
+        <section class="med-card" id="card-patient">
+          <h2 class="card-title">Patient Information</h2>
+          <div class="card-body">
 
-          <!-- Patient ID (auto-generated) -->
-          <div class="form-group">
-            <label for="patient-id" class="input-label">Patient ID <span class="auto-tag">auto</span></label>
-            <input type="text" id="patient-id" class="input-field" readonly placeholder="P-1023" required>
-          </div>
-
-          <!-- Name (optional) & Sex (required) -->
-          <div class="field-row">
-            <div class="form-group field-col">
-              <label for="patient-name" class="input-label">Name <span class="optional-tag">optional</span></label>
-              <input type="text" id="patient-name" class="input-field" placeholder="John Doe">
+            <div class="field-row">
+              <div class="form-group">
+                <label for="patient-name" class="field-label">Patient Name <span class="req-mark">*</span></label>
+                <input type="text" id="patient-name" class="text-input" placeholder="Enter full name" required>
+              </div>
+              <div class="form-group">
+                <label for="patient-id" class="field-label">Patient ID <span class="opt-tag">auto</span></label>
+                <input type="text" id="patient-id" class="text-input" readonly placeholder="P-1024">
+              </div>
             </div>
-            <div class="form-group field-col">
-              <label for="patient-sex" class="input-label">Sex <span class="req-star">*</span></label>
-              <select id="patient-sex" class="input-field select-field" required>
-                <option value="">Select...</option>
-                <option value="F">Female</option>
-                <option value="M">Male</option>
-                <option value="Other">Other</option>
-              </select>
+
+            <div class="field-row">
+              <div class="form-group">
+                <label for="patient-age" class="field-label">Age Category <span class="req-mark">*</span></label>
+                <select id="patient-age" class="select-input" required>
+                  <option value="">Select...</option>
+                  <option value="Infant">Infant (0-1 yr)</option>
+                  <option value="Toddler">Toddler (1-3 yr)</option>
+                  <option value="Child">Child (3-12 yr)</option>
+                  <option value="Teenager">Teenager (13-17 yr)</option>
+                  <option value="Adult">Adult (18-64 yr)</option>
+                  <option value="Senior">Senior (65+ yr)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="patient-gender" class="field-label">Gender <span class="req-mark">*</span></label>
+                <select id="patient-gender" class="select-input" required>
+                  <option value="">Select...</option>
+                  <option value="F">Female</option>
+                  <option value="M">Male</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
             </div>
-          </div>
 
-          <!-- Age Category (required) -->
-          <div class="form-group">
-            <label for="patient-age" class="input-label">Age category <span class="req-star">*</span></label>
-            <select id="patient-age" class="input-field select-field" required>
-              <option value="">Select...</option>
-              <option value="Infant">Infant (0-1 yr)</option>
-              <option value="Toddler">Toddler (1-3 yr)</option>
-              <option value="Child">Child (3-12 yr)</option>
-              <option value="Teenager">Teenager (13-17 yr)</option>
-              <option value="Adult">Adult (18-64 yr)</option>
-              <option value="Senior">Senior Citizen (65+ yr)</option>
-            </select>
-          </div>
-        </fieldset>
+            <div class="form-group">
+              <label for="chief-complaint" class="field-label">Chief Complaint <span class="req-mark">*</span></label>
+              <input type="text" id="chief-complaint" class="text-input"
+                placeholder="e.g. Chest pain, shortness of breath" required>
+            </div>
 
-        <!-- Photo capture section -->
-        <fieldset class="field-section">
-          <legend class="section-legend">Photo</legend>
-
-          <div class="image-buttons">
-            <button type="button" class="img-btn" id="btn-take-photo">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
-              <span>Take photo</span>
-            </button>
-            <input type="file" id="input-take-photo" accept="image/*" capture="environment" class="sr-only">
-
-            <label class="img-btn" tabindex="0">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-              <span>Upload image</span>
-              <input type="file" id="input-upload-image" accept="image/*" class="sr-only">
-            </label>
-          </div>
-
-          <!-- Selected Image Pill -->
-          <div id="image-pill" class="image-pill" hidden>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a0a0a0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
-            <span id="image-filename" class="filename">photo.webp</span>
-            <button type="button" id="btn-remove-image" class="remove-btn" aria-label="Remove image">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
-          </div>
-        </fieldset>
-
-        <!-- Structured Vitals section -->
-        <fieldset class="field-section">
-          <legend class="section-legend">Structured vitals</legend>
-
-          <div class="vital-row">
-            <div class="vital-col">
-              <label for="vital-temp" class="vital-sub-label">Temperature</label>
+            <div class="form-group form-group-sm">
+              <label for="patient-weight" class="field-label">Approx. Weight <span
+                  class="opt-tag">optional</span></label>
               <div class="input-with-unit">
-                <input type="number" id="vital-temp" class="input-field" step="0.1" min="80" max="115" inputmode="decimal" placeholder="98.6">
-                <span class="unit">°F</span>
+                <input type="number" id="patient-weight" class="text-input" step="0.1" min="0" max="500"
+                  inputmode="decimal" placeholder="70">
+                <span class="unit-label">kg</span>
               </div>
-              <p class="vital-error" id="error-vital-temp" hidden></p>
             </div>
-            <div class="vital-col">
-              <label for="temp-site" class="vital-sub-label">Site <span id="site-req" class="req-star" hidden>*</span></label>
-              <select id="temp-site" class="input-field select-field">
-                <option value="">Select...</option>
-                <option value="Oral">Oral</option>
-                <option value="Axilla">Axilla</option>
-                <option value="Rectal">Rectal</option>
-              </select>
-            </div>
-          </div>
 
-          <div class="vital-row">
-            <div class="vital-col">
-              <label for="vital-pulse" class="vital-sub-label">Pulse</label>
+            <div class="form-group">
+              <label for="allergies" class="field-label">Allergies <span class="opt-tag">optional</span></label>
+              <input type="text" id="allergies" class="text-input" placeholder="e.g. Penicillin, peanuts, latex">
+            </div>
+
+            <div class="form-group">
+              <label class="field-label">Known Medical Conditions <span class="opt-tag">optional</span></label>
+              <div class="chip-group" id="conditions-chips">
+                <button type="button" class="chip" data-condition="COPD">COPD</button>
+                <button type="button" class="chip" data-condition="Diabetes">Diabetes</button>
+                <button type="button" class="chip" data-condition="Hypertension">Hypertension</button>
+                <button type="button" class="chip" data-condition="Asthma">Asthma</button>
+                <button type="button" class="chip" data-condition="Cardiac Disease">Cardiac Disease</button>
+                <button type="button" class="chip" data-condition="Kidney Disease">Kidney Disease</button>
+                <button type="button" class="chip" data-condition="Other">Other</button>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- Vital Signs -->
+        <section class="med-card" id="card-vitals">
+          <h2 class="card-title">Vital Signs</h2>
+          <div class="card-body">
+
+            <div class="field-row">
+              <div class="form-group">
+                <label for="vital-rr" class="field-label">Respiratory Rate <span class="req-mark">*</span></label>
+                <div class="input-with-unit">
+                  <input type="number" id="vital-rr" class="text-input" min="4" max="80" step="1" inputmode="numeric"
+                    placeholder="16" required>
+                  <span class="unit-label">breaths/min</span>
+                </div>
+                <p class="field-error" id="error-vital-rr" hidden></p>
+              </div>
+              <div class="form-group">
+                <label for="vital-spo2" class="field-label">Oxygen Saturation (SpO2) <span
+                    class="opt-tag">optional</span></label>
+                <div class="input-with-unit">
+                  <input type="number" id="vital-spo2" class="text-input" min="50" max="100" step="1"
+                    inputmode="numeric" placeholder="97">
+                  <span class="unit-label">%</span>
+                </div>
+                <p class="field-error" id="error-vital-spo2" hidden></p>
+              </div>
+            </div>
+
+            <div class="toggle-row">
+              <span class="toggle-label">Supplemental Oxygen</span>
+              <button type="button" class="toggle-switch" id="toggle-o2" role="switch" aria-checked="false"
+                aria-label="Supplemental oxygen">
+                <span class="toggle-slider"></span>
+              </button>
+            </div>
+
+            <div class="field-row">
+              <div class="form-group">
+                <label for="vital-pulse" class="field-label">Pulse Rate <span class="req-mark">*</span></label>
+                <div class="input-with-unit">
+                  <input type="number" id="vital-pulse" class="text-input" min="20" max="260" step="1"
+                    inputmode="numeric" placeholder="72" required>
+                  <span class="unit-label">bpm</span>
+                </div>
+                <p class="field-error" id="error-vital-pulse" hidden></p>
+              </div>
+            </div>
+
+            <div class="field-row">
+              <div class="form-group form-group-sm">
+                <label for="vital-bp-sys" class="field-label">Systolic BP <span class="opt-tag">optional</span></label>
+                <div class="input-with-unit">
+                  <input type="number" id="vital-bp-sys" class="text-input" min="40" max="300" step="1"
+                    inputmode="numeric" placeholder="120">
+                  <span class="unit-label">mmHg</span>
+                </div>
+                <p class="field-error" id="error-vital-bp-sys" hidden></p>
+              </div>
+              <div class="form-group form-group-sm">
+                <label for="vital-bp-dia" class="field-label">Diastolic BP <span class="opt-tag">optional</span></label>
+                <div class="input-with-unit">
+                  <input type="number" id="vital-bp-dia" class="text-input" min="20" max="200" step="1"
+                    inputmode="numeric" placeholder="80">
+                  <span class="unit-label">mmHg</span>
+                </div>
+                <p class="field-error" id="error-vital-bp-dia" hidden></p>
+              </div>
+            </div>
+
+            <div class="form-group form-group-sm">
+              <label for="vital-temp" class="field-label">Body Temperature <span class="req-mark">*</span></label>
               <div class="input-with-unit">
-                <input type="number" id="vital-pulse" class="input-field" min="20" max="260" step="1" inputmode="numeric" placeholder="72">
-                <span class="unit">bpm</span>
+                <input type="number" id="vital-temp" class="text-input" min="30" max="45" step="0.1" inputmode="decimal"
+                  placeholder="37.0" required>
+                <span class="unit-label">&deg;C</span>
               </div>
-              <p class="vital-error" id="error-vital-pulse" hidden></p>
+              <p class="field-error" id="error-vital-temp" hidden></p>
             </div>
-            <div class="vital-col">
-              <label for="vital-resp" class="vital-sub-label">Respiration</label>
-              <div class="input-with-unit">
-                <input type="number" id="vital-resp" class="input-field" min="4" max="80" step="1" inputmode="numeric" placeholder="16">
-                <span class="unit-sm">breaths/min</span>
+
+            <div class="form-group">
+              <label class="field-label">Mental Status <span class="req-mark">*</span></label>
+              <input type="hidden" id="consciousness" value="">
+              <div class="mental-status-group" id="mental-status-group">
+                <button type="button" class="mental-status-btn" data-value="A">Alert</button>
+                <button type="button" class="mental-status-btn" data-value="C" id="ms-confusion">Confused</button>
+                <button type="button" class="mental-status-btn" data-value="V">Voice</button>
+                <button type="button" class="mental-status-btn" data-value="P">Pain</button>
+                <button type="button" class="mental-status-btn" data-value="U">Unresponsive</button>
               </div>
-              <p class="vital-error" id="error-vital-resp" hidden></p>
             </div>
-          </div>
 
-          <div class="vital-row bp-row">
-            <div class="vital-col bp-col">
-              <label class="vital-sub-label">Blood pressure</label>
-              <div class="bp-inputs">
-                <input type="number" id="vital-bp-sys" class="input-field bp-input" min="40" max="300" step="1" inputmode="numeric" placeholder="120" aria-label="Systolic">
-                <span class="bp-slash">/</span>
-                <input type="number" id="vital-bp-dia" class="input-field bp-input" min="20" max="200" step="1" inputmode="numeric" placeholder="80" aria-label="Diastolic">
-                <span class="bp-unit">mmHg</span>
+          </div>
+        </section>
+
+        <!-- Clinical Assessment -->
+        <section class="med-card" id="card-clinical">
+          <h2 class="card-title">Clinical Assessment</h2>
+          <div class="card-body">
+
+            <div class="toggle-grid">
+              <div class="toggle-row">
+                <span class="toggle-label">Suspected Infection</span>
+                <button type="button" class="toggle-switch" id="toggle-infection" role="switch" aria-checked="false"
+                  aria-label="Suspected infection">
+                  <span class="toggle-slider"></span>
+                </button>
               </div>
-              <p class="vital-error" id="error-vital-bp" hidden></p>
+              <div class="toggle-row">
+                <span class="toggle-label">Difficulty Breathing</span>
+                <button type="button" class="toggle-switch" id="toggle-breathing" role="switch" aria-checked="false"
+                  aria-label="Difficulty breathing">
+                  <span class="toggle-slider"></span>
+                </button>
+              </div>
+              <div class="toggle-row">
+                <span class="toggle-label">Active Bleeding</span>
+                <button type="button" class="toggle-switch" id="toggle-bleeding" role="switch" aria-checked="false"
+                  aria-label="Active bleeding">
+                  <span class="toggle-slider"></span>
+                </button>
+              </div>
+              <div class="toggle-row">
+                <span class="toggle-label">Chest Pain</span>
+                <button type="button" class="toggle-switch" id="toggle-chest-pain" role="switch" aria-checked="false"
+                  aria-label="Chest pain">
+                  <span class="toggle-slider"></span>
+                </button>
+              </div>
+              <div class="toggle-row">
+                <span class="toggle-label">Trauma / Injury</span>
+                <button type="button" class="toggle-switch" id="toggle-trauma" role="switch" aria-checked="false"
+                  aria-label="Trauma or injury">
+                  <span class="toggle-slider"></span>
+                </button>
+              </div>
+              <div class="toggle-row">
+                <span class="toggle-label">Pregnancy</span>
+                <button type="button" class="toggle-switch toggle-disabled" id="toggle-pregnancy" role="switch"
+                  aria-checked="false" aria-label="Pregnancy" disabled>
+                  <span class="toggle-slider"></span>
+                </button>
+              </div>
             </div>
+
+            <div class="form-group notes-group">
+              <label for="notes" class="field-label">Additional Observations <span
+                  class="opt-tag">optional</span></label>
+              <textarea id="notes" class="text-input textarea-input"
+                placeholder="Medications administered, injuries, symptoms, or remarks"></textarea>
+            </div>
+
           </div>
-        </fieldset>
+        </section>
 
-      </section>
+        <!-- Photo Capture -->
+        <section class="med-card" id="card-photo">
+          <h2 class="card-title">Photo Capture</h2>
+          <div class="card-body">
+            <div class="image-buttons">
+              <button type="button" class="img-btn" id="btn-take-photo">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+                  <circle cx="12" cy="13" r="4"></circle>
+                </svg>
+                <span>Camera Capture</span>
+              </button>
+              <input type="file" id="input-take-photo" accept="image/*" capture="environment" class="sr-only">
 
-      <!-- ================= RIGHT COLUMN: NOTES + SEND + RECENTLY SENT ================= -->
-      <aside class="panel panel-secondary" aria-label="Notes, send, and activity">
+              <button type="button" class="img-btn" id="btn-upload-photo">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                <span>Gallery Upload</span>
+              </button>
+              <input type="file" id="input-upload-image" accept="image/*" multiple class="sr-only">
+            </div>
 
-        <!-- Emergency Notes -->
-        <fieldset class="field-section">
-          <legend class="section-legend">Notes</legend>
-
-          <div class="form-group">
-            <label for="notes" class="input-label">Emergency notes <span class="optional-tag">optional</span></label>
-            <textarea id="notes" class="input-field textarea-field" placeholder="BP 142/95, SpO2 91%, pulse 108..."></textarea>
+            <div class="image-previews" id="image-previews"></div>
           </div>
-        </fieldset>
+        </section>
 
-        <!-- Send button -->
-        <div class="send-bar">
-          <button type="submit" id="btn-send" class="send-btn" disabled>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-            <span>Send to hospital</span>
+        <!-- Submit Button -->
+        <div class="submit-bar">
+          <button type="submit" id="btn-send" class="submit-btn" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+            <span>Submit Patient Data</span>
           </button>
         </div>
 
-        <!-- Divider -->
-        <div class="divider"></div>
+      </div>
 
-        <!-- Collapsible on mobile, always open on desktop -->
-        <details class="recent-details" open>
-          <summary class="recent-summary">
-            <span class="section-title">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"></path><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"></path><path d="M12 7v5l4 2"></path></svg>
-              recently sent
-            </span>
-            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-          </summary>
+      <!-- ============ RIGHT COLUMN ============ -->
+      <div class="col-secondary">
 
-          <ul id="sent-list" class="sent-list">
-            <li class="empty-state" id="sent-empty">Nothing sent yet</li>
-          </ul>
-        </details>
+        <!-- Patient Assessment -->
+        <section class="med-card assessment-card" id="card-assessment-score">
+          <h2 class="card-title">Patient Assessment</h2>
+          <div class="card-body">
 
-      </aside>
+            <div class="assessment-protocol-row">
+              <span class="assessment-meta-label">Assessment Protocol</span>
+              <span class="assessment-protocol-name" id="assessment-protocol">Select age category</span>
+            </div>
+
+            <p class="assessment-progress" id="assessment-progress" hidden></p>
+
+            <div class="assessment-row">
+              <div class="assessment-block">
+                <span class="assessment-meta-label">Priority Level</span>
+                <div class="assessment-badge-row">
+                  <span class="risk-dot" id="priority-dot"></span>
+                  <span class="assessment-value" id="assessment-priority">--</span>
+                </div>
+              </div>
+              <div class="score-divider"></div>
+              <div class="assessment-block">
+                <span class="assessment-meta-label">Triage Category</span>
+                <div class="assessment-badge-row">
+                  <span class="risk-dot" id="triage-dot"></span>
+                  <span class="assessment-value" id="assessment-triage">--</span>
+                </div>
+              </div>
+            </div>
+
+            <p class="assessment-action" id="assessment-action">Fill in patient information and vital signs to generate
+              assessment.</p>
+
+            <!-- Expandable explainability -->
+            <details class="explain-section" id="assessment-explain" hidden>
+              <summary class="explain-summary">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
+                Why was this patient classified this way?
+              </summary>
+              <div class="explain-body">
+                <p class="explain-protocol" id="explain-protocol"></p>
+                <h3 class="explain-subheading">Clinical Findings</h3>
+                <ul class="explain-list" id="explain-findings"></ul>
+                <h3 class="explain-subheading">Triggered Rules</h3>
+                <ul class="explain-list" id="explain-rules"></ul>
+                <h3 class="explain-subheading">Final Category</h3>
+                <p class="explain-final" id="explain-final"></p>
+                <h3 class="explain-subheading">Sources</h3>
+                <p class="explain-sources" id="explain-sources"></p>
+              </div>
+            </details>
+
+          </div>
+        </section>
+
+        <!-- Recent Patients -->
+        <section class="med-card" id="card-recent">
+          <h2 class="card-title">Recent Patients</h2>
+          <div class="card-body">
+            <ul class="patient-list" id="sent-list">
+              <li class="empty-state" id="sent-empty">No patients submitted yet</li>
+            </ul>
+          </div>
+        </section>
+
+      </div>
 
     </form>
   </div>
 
-  <!-- Camera Overlay (fullscreen viewfinder) -->
+  <!-- Camera Overlay -->
   <div id="camera-overlay" class="camera-overlay" hidden>
     <div class="camera-container">
       <video id="camera-video" class="camera-video" autoplay playsinline></video>
       <canvas id="camera-canvas" class="sr-only"></canvas>
       <div id="camera-error" class="camera-error" hidden>
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+          <line x1="1" y1="1" x2="23" y2="23"></line>
+        </svg>
         <p id="camera-error-text" class="camera-error-text"></p>
-        <button type="button" id="btn-camera-retry" class="camera-ctrl-btn camera-retry-btn">Try again</button>
+        <button type="button" id="btn-camera-retry" class="camera-ctrl-btn camera-retry-btn">Try Again</button>
       </div>
       <div class="camera-controls">
         <button type="button" id="btn-camera-close" class="camera-ctrl-btn camera-close-btn" aria-label="Close camera">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
         </button>
-        <button type="button" id="btn-camera-capture" class="camera-ctrl-btn camera-capture-btn" aria-label="Take photo">
+        <button type="button" id="btn-camera-capture" class="camera-ctrl-btn camera-capture-btn"
+          aria-label="Take photo">
           <div class="capture-ring"></div>
         </button>
       </div>
     </div>
   </div>
 
+  <script src="../shared/store.js"></script>
   <script src="app.js"></script>
 </body>
+
 </html>

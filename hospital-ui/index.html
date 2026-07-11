@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#FFFFFF">
+  <title>Hospital Emergency Dashboard</title>
+  <link rel="stylesheet" href="../field-ui/app.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+  <div class="hosp-shell">
+
+    <header class="hosp-header">
+      <h1 class="page-title">Hospital Emergency Dashboard</h1>
+      <span class="conn-badge conn-live" id="conn-badge">
+        <span class="conn-dot"></span> Live
+      </span>
+    </header>
+
+    <div class="hosp-main">
+
+      <!-- ============ QUEUE PANEL (master) ============ -->
+      <aside class="queue-panel" id="queue-panel">
+
+        <div class="queue-tabs" role="tablist">
+          <button type="button" class="queue-tab active" id="tab-active" data-tab="active" role="tab" aria-selected="true">
+            Live Emergency Queue <span class="tab-count" id="count-active">0</span>
+          </button>
+          <button type="button" class="queue-tab" id="tab-completed" data-tab="completed" role="tab" aria-selected="false">
+            Completed <span class="tab-count" id="count-completed">0</span>
+          </button>
+        </div>
+
+        <div class="queue-view" id="queue-view-active">
+          <section class="priority-section" data-priority="critical">
+            <button type="button" class="priority-header priority-critical" data-priority="critical" aria-expanded="true">
+              <span class="priority-emoji">🔴</span>
+              <span class="priority-name">Critical</span>
+              <span class="priority-count" id="pcount-critical">0</span>
+              <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="priority-cards" id="cards-critical"></div>
+          </section>
+
+          <section class="priority-section" data-priority="high">
+            <button type="button" class="priority-header priority-high" data-priority="high" aria-expanded="true">
+              <span class="priority-emoji">🟠</span>
+              <span class="priority-name">High</span>
+              <span class="priority-count" id="pcount-high">0</span>
+              <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="priority-cards" id="cards-high"></div>
+          </section>
+
+          <section class="priority-section" data-priority="moderate">
+            <button type="button" class="priority-header priority-moderate" data-priority="moderate" aria-expanded="true">
+              <span class="priority-emoji">🟡</span>
+              <span class="priority-name">Moderate</span>
+              <span class="priority-count" id="pcount-moderate">0</span>
+              <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="priority-cards" id="cards-moderate"></div>
+          </section>
+
+          <section class="priority-section" data-priority="stable">
+            <button type="button" class="priority-header priority-stable" data-priority="stable" aria-expanded="true">
+              <span class="priority-emoji">🟢</span>
+              <span class="priority-name">Stable</span>
+              <span class="priority-count" id="pcount-stable">0</span>
+              <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="priority-cards" id="cards-stable"></div>
+          </section>
+
+          <p class="queue-empty" id="queue-empty">No patients in the active queue yet. Submissions from field-ui will appear here automatically.</p>
+        </div>
+
+        <div class="queue-view" id="queue-view-completed" hidden>
+          <div class="priority-cards" id="cards-completed"></div>
+          <p class="queue-empty" id="completed-empty">No completed patients yet.</p>
+        </div>
+
+      </aside>
+
+      <!-- ============ DETAIL PANEL ============ -->
+      <main class="detail-panel" id="detail-panel">
+        <button type="button" class="back-btn" id="btn-back">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+          Back to Queue
+        </button>
+
+        <div class="detail-empty" id="detail-empty">
+          <p>Select a patient from the queue<br>to view the complete assessment.</p>
+        </div>
+
+        <div class="detail-content" id="detail-content" hidden></div>
+      </main>
+
+    </div>
+  </div>
+
+  <!-- Image viewer overlay -->
+  <div class="image-viewer" id="image-viewer" hidden>
+    <div class="viewer-toolbar">
+      <button type="button" id="viewer-zoom-out" aria-label="Zoom out">−</button>
+      <button type="button" id="viewer-zoom-in" aria-label="Zoom in">+</button>
+      <button type="button" id="viewer-rotate" aria-label="Rotate">⟳ Rotate</button>
+      <button type="button" id="viewer-fullscreen" aria-label="Toggle fullscreen">⛶ Fullscreen</button>
+      <button type="button" id="viewer-close" aria-label="Close image viewer">✕ Close</button>
+    </div>
+    <div class="viewer-stage" id="viewer-stage">
+      <img id="viewer-img" src="" alt="Uploaded field image, full size">
+    </div>
+  </div>
+
+  <script src="../shared/store.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
