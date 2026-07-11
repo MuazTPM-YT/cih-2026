@@ -59,6 +59,28 @@ body {
   50% { opacity: 0.35; }
 }
 
+/* Offline / reconnecting state for the live badge */
+.conn-badge.conn-offline {
+  background: rgba(220,38,38,0.12);
+  color: var(--triage-critical);
+}
+.conn-badge.conn-offline .conn-dot { background: var(--triage-critical); }
+
+/* Raw FHIR JSON viewer in the detail panel */
+.fhir-details { margin-top: 4px; }
+.fhir-pre {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--bg-page, #0b0b0c);
+  border: 1px solid var(--border, #2a2a2e);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre;
+}
+
 .hosp-main {
   display: flex;
   flex: 1;
