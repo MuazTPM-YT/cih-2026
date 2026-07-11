@@ -79,7 +79,7 @@ async fn free_addr() -> SocketAddr {
 async fn spawn_gateway(store: Arc<Store>, key: Key) -> SocketAddr {
     let addr = free_addr().await;
     tokio::spawn(async move {
-        let _ = tgw_gateway::run_udp_listener(addr, store, key).await;
+        let _ = tgw_gateway::run_udp_listener(addr, store, key, Duration::from_secs(5)).await;
     });
     tokio::time::sleep(Duration::from_millis(60)).await;
     addr

@@ -167,10 +167,10 @@ impl BundleSender {
             if block_index >= self.repair_cursor.len() || needed == 0 {
                 continue;
             }
-            // `needed` is an unauthenticated wire value: clamp it to the block's own source
-            // count before the margin. You never need more than ~K repair symbols to recover a
-            // K-symbol block, and clamping first makes the `+ NACK_MARGIN` overflow-proof, so a
-            // forged `needed = u32::MAX` can neither panic (debug) nor exhaust memory (release).
+            // `needed` is off an UNAUTHENTICATED NACK frame (only RECEIPTs carry an AEAD
+            // tag), so a forged NACK could set it to `u32::MAX`. Clamp to the block's own
+            // source-symbol count before the margin: recovering a block never takes more
+            // than ~K repair symbols, and this makes overflow/allocation DoS impossible.
             let count = needed
                 .min(self.source_symbols[block_index])
                 .saturating_add(NACK_MARGIN);
@@ -379,7 +379,13 @@ impl BundleReceiver {
             .source_symbols
             .iter()
             .zip(&received_per_block)
-            .map(|(&k, &got)| k.saturating_sub(got) + NACK_MARGIN)
+            .map(|(&k, &got)| match k.saturating_sub(got) {
+                // A fully-received block needs nothing; asking for a margin here would
+                // burn bytes on a link where they're precious (`respond_to_nack` skips
+                // zero-need blocks). Only add the margin where a real shortfall exists.
+                0 => 0,
+                short => short + NACK_MARGIN,
+            })
             .collect();
         Some(NackFrame {
             bundle_id: active.bundle_id,
@@ -624,6 +630,68 @@ mod tests {
                 "duplicate ESI minted — repair symbols must always be fresh"
             );
         }
+    }
+
+    #[test]
+    fn build_nack_margin_tracks_shortfall() {
+        // A partially-received block must request its shortfall PLUS the margin; a block
+        // with no shortfall requests 0 (no wasted margin — the change in `build_nack`).
+        let mut rng = StdRng::seed_from_u64(SEED + 9);
+        let key = Key::generate();
+        let bundle = test_bundle(22_000, &mut rng);
+        let datagrams = match encode_bundle(&bundle, &key, &fec()) {
+            Ok(d) => d,
+            Err(e) => panic!("encode must succeed: {e}"),
+        };
+
+        let mut receiver = BundleReceiver::new(key);
+        let _ = receiver.absorb(&datagrams[0]); // exactly one source symbol seen
+        let needed = match receiver.build_nack() {
+            Some(n) => n.needed,
+            None => panic!("an in-flight decode must produce a NACK"),
+        };
+        let total = receiver.symbols_needed().expect("target known");
+        // One symbol received across the single block: shortfall = total-1, plus margin.
+        assert_eq!(
+            needed.iter().sum::<u32>(),
+            (total - 1) + NACK_MARGIN,
+            "shortfall must carry the margin: {needed:?}"
+        );
+    }
+
+    #[test]
+    fn forged_nack_cannot_overflow_or_exhaust_memory() {
+        // C-1 regression: NACK frames are unauthenticated, so an on-path attacker can
+        // forge `needed = u32::MAX` for an in-flight bundle. `respond_to_nack` must clamp
+        // to the block's source-symbol count — no debug overflow panic, no billion-symbol
+        // allocation — while still answering with a bounded, non-empty repair burst.
+        let mut rng = StdRng::seed_from_u64(SEED + 8);
+        let key = Key::generate();
+        let bundle = test_bundle(6_000, &mut rng);
+        let mut sender = match BundleSender::new(&bundle, &key, &fec()) {
+            Ok(s) => s,
+            Err(e) => panic!("sender must build: {e}"),
+        };
+        let _ = sender.initial_burst();
+
+        let block_count = sender.source_symbols.len();
+        let hostile = NackFrame {
+            bundle_id: sender.bundle_id(),
+            needed: vec![u32::MAX; block_count],
+        };
+        let repairs = sender.respond_to_nack(&hostile);
+
+        assert!(!repairs.is_empty(), "a NACK must still be answered");
+        let bound: usize = sender
+            .source_symbols
+            .iter()
+            .map(|&k| (k + NACK_MARGIN) as usize)
+            .sum();
+        assert!(
+            repairs.len() <= bound,
+            "repair burst {} exceeded the clamped bound {bound}",
+            repairs.len()
+        );
     }
 
     #[test]

@@ -175,6 +175,15 @@ impl Store {
         Ok(Some((mime, bytes.value().to_vec())))
     }
 
+    /// Retrieve a stored image's MIME type without loading its bytes, or `None` if unknown.
+    pub fn get_image_mime(&self, id: Uuid) -> anyhow::Result<Option<String>> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(IMAGE_MIME)?
+            .get(id.as_u128())?
+            .map(|g| g.value().to_string()))
+    }
+
     /// Retrieve a stored observation's JSON, or `None` if `id` is unknown.
     pub fn get_observation(&self, id: Uuid) -> anyhow::Result<Option<String>> {
         let txn = self.db.begin_read()?;

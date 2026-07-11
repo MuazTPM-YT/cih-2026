@@ -50,7 +50,7 @@ async fn spawn_gateway(store: Arc<Store>, key: Key) -> std::net::SocketAddr {
     drop(probe); // release so the listener can claim the same port
     tokio::spawn(async move {
         // Runs until the test process exits; a bind error here fails the assertions below.
-        let _ = tgw_gateway::run_udp_listener(addr, store, key).await;
+        let _ = tgw_gateway::run_udp_listener(addr, store, key, Duration::from_secs(5)).await;
     });
     // Give the listener a moment to bind before we send.
     tokio::time::sleep(Duration::from_millis(50)).await;

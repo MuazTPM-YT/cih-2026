@@ -2,7 +2,8 @@
 //!
 //! This is a **test instrument**, kept small. It sits between the field client and the
 //! gateway and drops/delays/rate-limits datagrams reproducibly so the integration test can
-//! assert delivery under the stated constraints. Implement `run_proxy` in **Phase C**.
+//! assert delivery under the stated constraints. [`run_proxy`] is bidirectional: the forward
+//! path applies loss + pacing + jitter, the reverse path relays gateway receipts/NACKs back.
 
 use std::net::SocketAddr;
 use std::time::Duration;
