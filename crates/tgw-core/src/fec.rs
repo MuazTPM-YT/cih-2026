@@ -353,7 +353,13 @@ impl BundleReceiver {
             .source_symbols
             .iter()
             .zip(&received_per_block)
-            .map(|(&k, &got)| k.saturating_sub(got) + NACK_MARGIN)
+            .map(|(&k, &got)| match k.saturating_sub(got) {
+                // A fully-received block needs nothing; asking for a margin here would
+                // burn bytes on a link where they're precious (`respond_to_nack` skips
+                // zero-need blocks). Only add the margin where a real shortfall exists.
+                0 => 0,
+                short => short + NACK_MARGIN,
+            })
             .collect();
         Some(NackFrame {
             bundle_id: active.bundle_id,
@@ -562,6 +568,33 @@ mod tests {
                 "duplicate ESI minted — repair symbols must always be fresh"
             );
         }
+    }
+
+    #[test]
+    fn build_nack_margin_tracks_shortfall() {
+        // A partially-received block must request its shortfall PLUS the margin; a block
+        // with no shortfall requests 0 (no wasted margin — the change in `build_nack`).
+        let mut rng = StdRng::seed_from_u64(SEED + 9);
+        let key = Key::generate();
+        let bundle = test_bundle(22_000, &mut rng);
+        let datagrams = match encode_bundle(&bundle, &key, &fec()) {
+            Ok(d) => d,
+            Err(e) => panic!("encode must succeed: {e}"),
+        };
+
+        let mut receiver = BundleReceiver::new(key);
+        let _ = receiver.absorb(&datagrams[0]); // exactly one source symbol seen
+        let needed = match receiver.build_nack() {
+            Some(n) => n.needed,
+            None => panic!("an in-flight decode must produce a NACK"),
+        };
+        let total = receiver.symbols_needed().expect("target known");
+        // One symbol received across the single block: shortfall = total-1, plus margin.
+        assert_eq!(
+            needed.iter().sum::<u32>(),
+            (total - 1) + NACK_MARGIN,
+            "shortfall must carry the margin: {needed:?}"
+        );
     }
 
     #[test]
