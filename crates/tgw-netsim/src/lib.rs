@@ -33,15 +33,44 @@ pub struct NetsimConfig {
 impl Default for NetsimConfig {
     fn default() -> Self {
         Self {
-            loss: 0.25,
-            burst_every: Duration::from_secs(5),
-            burst_len: Duration::from_millis(800),
-            rate_bps: 64_000,
-            jitter: Duration::from_millis(40),
-            seed: 1,
+            loss: DEFAULT_LOSS,
+            burst_every: DEFAULT_BURST_EVERY,
+            burst_len: DEFAULT_BURST_LEN,
+            rate_bps: DEFAULT_RATE_BPS,
+            jitter: DEFAULT_JITTER,
+            seed: DEFAULT_SEED,
         }
     }
 }
+
+impl NetsimConfig {
+    /// Reject configurations that would panic or make a rate cap meaningless.
+    fn validate(&self) -> anyhow::Result<()> {
+        if !(0.0..=1.0).contains(&self.loss) {
+            anyhow::bail!("netsim loss must be in 0.0..=1.0");
+        }
+        if self.burst_every.is_zero() {
+            anyhow::bail!("netsim burst_every must be non-zero");
+        }
+        if self.rate_bps == 0 {
+            anyhow::bail!("netsim rate_bps must be non-zero");
+        }
+        Ok(())
+    }
+}
+
+/// Default random loss rate used by the deterministic evidence harness.
+const DEFAULT_LOSS: f64 = 0.25;
+/// Time between deterministic burst-loss windows.
+const DEFAULT_BURST_EVERY: Duration = Duration::from_secs(5);
+/// Duration of each deterministic burst-loss window.
+const DEFAULT_BURST_LEN: Duration = Duration::from_millis(800);
+/// Link ceiling used by the evidence harness, in bits per second.
+const DEFAULT_RATE_BPS: u64 = 64_000;
+/// Maximum forward-path jitter in the evidence harness.
+const DEFAULT_JITTER: Duration = Duration::from_millis(40);
+/// Stable default seed for repeatable evidence runs.
+const DEFAULT_SEED: u64 = 1;
 
 /// Maximum UDP datagram size the proxy buffers (fits a 65535-byte IP payload).
 const MAX_DATAGRAM: usize = 65_535;
@@ -58,10 +87,11 @@ pub async fn run_proxy(
     listen: SocketAddr,
     forward: SocketAddr,
 ) -> anyhow::Result<()> {
-    let sock = UdpSocket::bind(listen)
+    cfg.validate()?;
+    let field_sock = UdpSocket::bind(listen)
         .await
         .context("netsim: bind listener")?;
-    let forward_sock = UdpSocket::bind("0.0.0.0:0")
+    let gateway_sock = UdpSocket::bind("0.0.0.0:0")
         .await
         .context("netsim: bind forwarder")?;
 
@@ -70,40 +100,42 @@ pub async fn run_proxy(
     // Separate, seeded RNG for jitter so it does not perturb the drop sequence.
     let mut jitter_rng = StdRng::seed_from_u64(cfg.seed.wrapping_add(1));
     let start = Instant::now();
-    let mut buf = vec![0u8; MAX_DATAGRAM];
+    let mut field_buf = vec![0u8; MAX_DATAGRAM];
+    let mut gateway_buf = vec![0u8; MAX_DATAGRAM];
+    let mut field_addr = None;
 
     loop {
-        let (n, src) = sock
-            .recv_from(&mut buf)
-            .await
-            .context("netsim: recv_from")?;
-        let payload = &buf[..n];
-
-        let elapsed = start.elapsed();
-        if loss.decide(elapsed) {
-            tracing::trace!(bytes = n, "netsim: dropping datagram");
-            continue;
+        tokio::select! {
+            received = field_sock.recv_from(&mut field_buf) => {
+                let (n, src) = received.context("netsim: receive field datagram")?;
+                field_addr = Some(src);
+                let elapsed = start.elapsed();
+                if loss.decide(elapsed) {
+                    tracing::trace!(bytes = n, "netsim: dropping forward datagram");
+                    continue;
+                }
+                let packet_bits = u64::try_from(n.saturating_mul(8)).unwrap_or(u64::MAX);
+                let pace_delay = pacer.schedule(elapsed, packet_bits);
+                let jitter_nanos = jitter_rng.gen_range(0..=cfg.jitter.as_nanos());
+                let total_delay = pace_delay + Duration::from_nanos(jitter_nanos as u64);
+                if !total_delay.is_zero() {
+                    sleep(total_delay).await;
+                }
+                gateway_sock.send_to(&field_buf[..n], forward).await.context("netsim: forward datagram")?;
+                tracing::trace!(bytes = n, from = %src, delay = ?total_delay, "netsim: forwarded");
+            }
+            received = gateway_sock.recv_from(&mut gateway_buf) => {
+                let (n, src) = received.context("netsim: receive gateway reply")?;
+                if src != forward {
+                    tracing::warn!(%src, "netsim: ignoring reply from unexpected address");
+                    continue;
+                }
+                if let Some(field) = field_addr {
+                    field_sock.send_to(&gateway_buf[..n], field).await.context("netsim: relay reply")?;
+                    tracing::trace!(bytes = n, to = %field, "netsim: relayed gateway reply");
+                }
+            }
         }
-
-        // Serialise at the rate cap; then add bounded jitter on top of the paced delay.
-        let packet_bits = u64::try_from(n.saturating_mul(8)).unwrap_or(u64::MAX);
-        let pace_delay = pacer.schedule(elapsed, packet_bits);
-        let jitter_nanos = if cfg.jitter.is_zero() {
-            0
-        } else {
-            jitter_rng.gen_range(0..cfg.jitter.as_nanos().max(1))
-        };
-        let jitter_delay = Duration::from_nanos(jitter_nanos as u64);
-        let total_delay = pace_delay + jitter_delay;
-        if !total_delay.is_zero() {
-            sleep(total_delay).await;
-        }
-
-        forward_sock
-            .send_to(payload, forward)
-            .await
-            .context("netsim: send_to forward")?;
-        tracing::trace!(bytes = n, from = %src, delay = ?total_delay, "netsim: forwarded");
     }
 }
 
@@ -148,10 +180,8 @@ impl LossModel {
     /// Decide whether to drop the current datagram at `elapsed` since start.
     /// `true` = drop. See the type docs for the exact, deterministic semantics.
     pub fn decide(&mut self, elapsed: Duration) -> bool {
-        if self.in_burst_window(elapsed) {
-            return true;
-        }
-        self.rng.gen_bool(self.cfg.loss)
+        let random_drop = self.rng.gen_bool(self.cfg.loss);
+        self.in_burst_window(elapsed) || random_drop
     }
 
     /// True when `elapsed` falls inside any burst window `[n*burst_every, n*burst_every+burst_len)`
@@ -164,6 +194,7 @@ impl LossModel {
         let phase = elapsed.as_nanos() % every_ns;
         phase < self.cfg.burst_len.as_nanos()
     }
+
 }
 
 /// Token-bucket pacer that serialises datagrams at a fixed bits-per-second cap.
