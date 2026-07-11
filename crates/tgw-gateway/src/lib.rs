@@ -1,16 +1,19 @@
 //! `tgw-gateway` library — UDP receiver/decoder + axum HTTP API (Contract 3).
 //!
 //! OWNER: Twaha. Binaries are thin async shells (see `main.rs`); logic lives here so the
-//! integration test can drive it in-process (Phase D).
+//! integration test can drive it in-process.
 //!
-//! At scaffold stage the HTTP layer already serves the mock fixtures from
-//! `static/mock/*.json`, so the dashboard works end-to-end immediately. The UDP decode path
-//! and the redb-backed real API are `todo!()` — fill them in Phases B/E/F.
+//! Two routers ship: [`router`] serves the `static/mock/*.json` fixtures (used by the
+//! `api_contract` tests and quick dashboard bring-up), and [`router_with_store`] backs the
+//! same Contract-3 shapes with the live redb [`Store`]. The UDP decode path
+//! ([`run_udp_listener`]) reassembles bundles, emits FHIR + AEAD receipts, and drives the
+//! gateway-side NACK/repair loop. All are implemented and tested.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Router;
@@ -20,12 +23,13 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tgw_core::{
-    Absorb, Bundle, BundlePayload, BundleReceiver, Frame, Key, build_receipt, encode_nack,
-    parse_frame,
+    Absorb, Bundle, BundlePayload, BundleReceiver, CoreError, Frame, Key, build_receipt,
+    encode_nack, parse_frame,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::net::UdpSocket;
+use tokio::time::timeout;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
@@ -98,34 +102,59 @@ pub async fn run_http_server_store(addr: SocketAddr, state: StoreState) -> anyho
     Ok(())
 }
 
-/// Bind the UDP socket, decode incoming bundles, emit FHIR + receipts.
+/// Bind the UDP socket, decode incoming bundles, emit FHIR + receipts, and drive the
+/// gateway-side NACK/repair loop.
 ///
-/// Loop: `recv_from` → [`tgw_core::parse_frame`] → for `DATA` frames, drive the matching
-/// [`tgw_core::BundleReceiver`] with [`tgw_core::BundleReceiver::absorb`]. On
-/// [`tgw_core::Absorb::Complete`], dedup against the [`Store`]: a brand-new bundle is persisted
-/// (FHIR JSON for vitals, raw bytes for images) and marked delivered; a re-burst of an
-/// already-delivered bundle is logged but not re-stored (idempotent). In both cases a
-/// `DELIVERED` receipt is owed back to the field (Phase E).
+/// Loop: `recv_from` (bounded by `nack_timeout`) → [`tgw_core::parse_frame`] → for `DATA`
+/// frames, drive the matching [`tgw_core::BundleReceiver`] with
+/// [`tgw_core::BundleReceiver::absorb`]. On [`tgw_core::Absorb::Complete`], dedup against the
+/// [`Store`]: a brand-new bundle is persisted (FHIR JSON for vitals, raw bytes for images)
+/// and marked delivered; a re-burst of an already-delivered bundle is logged but not
+/// re-stored (idempotent). In both cases a `DELIVERED` receipt is sent back to the field.
 ///
-/// NOTE: [`tgw_core::BundleReceiver::absorb`] and [`tgw_core::parse_frame`] are `todo!()` on
-/// Muaz's branch; a live decode panics until his core lands — expected at the H6 sync. The
-/// store/dedup path is real and unit-tested; the receipt send is `BLOCKED(PHASE-E)` until Muaz's
-/// `build_receipt` + `Key::from_file` exist. This path is correct-by-construction and
-/// compiles + clippy-clean today.
-pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> anyhow::Result<()> {
+/// Decode-stall recovery: `recv_from` is wrapped in a `nack_timeout` window. When it
+/// elapses with in-flight bundles still incomplete, the gateway mints a
+/// [`tgw_core::BundleReceiver::build_nack`] for each and sends it to that bundle's remembered
+/// source address — the gateway-initiated repair loop from the architecture. The field's own
+/// silence re-burst remains a backstop; both are idempotent under the fountain code.
+pub async fn run_udp_listener(
+    addr: SocketAddr,
+    store: Arc<Store>,
+    key: Key,
+    nack_timeout: Duration,
+) -> anyhow::Result<()> {
     let sock = UdpSocket::bind(addr)
         .await
         .context("gateway: bind UDP listener")?;
     tracing::info!(%addr, "gateway UDP listening");
 
     let mut receivers: HashMap<Uuid, BundleReceiver> = HashMap::new();
+    // Where to send NACKs/receipts for each in-flight bundle (its last-seen field source).
+    let mut sources: HashMap<Uuid, SocketAddr> = HashMap::new();
     let mut buf = vec![0u8; MAX_DATAGRAM];
 
     loop {
-        let (n, src) = sock
-            .recv_from(&mut buf)
-            .await
-            .context("gateway: recv_from")?;
+        let (n, src) = match timeout(nack_timeout, sock.recv_from(&mut buf)).await {
+            Ok(result) => result.context("gateway: recv_from")?,
+            Err(_elapsed) => {
+                // Stall timer: nudge every incomplete in-flight bundle with a fresh NACK.
+                for (bundle_id, receiver) in &receivers {
+                    let Some(nack) = receiver.build_nack() else {
+                        continue;
+                    };
+                    if nack.needed.iter().sum::<u32>() == 0 {
+                        continue;
+                    }
+                    if let Some(dst) = sources.get(bundle_id) {
+                        sock.send_to(&encode_nack(&nack), *dst)
+                            .await
+                            .context("gateway: send stall NACK")?;
+                        tracing::info!(%bundle_id, "gateway: decode stalled, NACK sent");
+                    }
+                }
+                continue;
+            }
+        };
         let dgram = &buf[..n];
 
         let frame = match parse_frame(dgram) {
@@ -140,6 +169,7 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
             Frame::Data { bundle_id } => {
                 // Drive the per-bundle receiver. The borrow of `receivers` ends once `absorb`
                 // returns, so we can mutate `receivers` again in the outcome arms below.
+                sources.insert(bundle_id, src);
                 let (outcome, symbols_received, symbols_needed) = {
                     let receiver = receivers
                         .entry(bundle_id)
@@ -163,6 +193,7 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
                     }
                     Ok(Absorb::Complete(bundle)) => {
                         receivers.remove(&bundle_id);
+                        sources.remove(&bundle_id);
                         if handle_complete(&store, &bundle)? {
                             let receipt = build_receipt(bundle.id, &key);
                             sock.send_to(&receipt, src)
@@ -181,9 +212,33 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
                             .await
                             .context("gateway: send NACK")?;
                     }
-                    Err(e) => {
-                        tracing::warn!(%bundle_id, error = %e, "gateway: absorb failed, dropping bundle");
+                    Err(CoreError::Crypto) => {
+                        // AEAD verification failed on a fully reconstructed envelope (Fix 1b):
+                        // the bundle is poisoned. Persist nothing, send no receipt, and drop
+                        // the receiver. The field, receiving no receipt within its timeout,
+                        // re-bursts (its existing backoff) and a fresh receiver retries the
+                        // whole bundle — so this stays retryable end-to-end. Never log key
+                        // material or plaintext; only ids and counts.
+                        tracing::warn!(
+                            %bundle_id,
+                            symbols_received,
+                            symbols_needed,
+                            "gateway: AEAD verification failed after reconstruction — \
+                             dropping bundle (no persist, no receipt); bundle remains retryable"
+                        );
                         receivers.remove(&bundle_id);
+                        sources.remove(&bundle_id);
+                    }
+                    Err(e) => {
+                        // A single corrupt/malformed datagram (failed integrity tag or bad
+                        // framing) from radio interference or a forged packet (Fix 1a). Drop
+                        // just this datagram and KEEP the receiver's accumulated clean symbols
+                        // — one bad packet must never discard an in-progress bundle.
+                        tracing::debug!(
+                            %bundle_id,
+                            error = %e,
+                            "gateway: dropping corrupt datagram, keeping bundle progress"
+                        );
                     }
                 }
             }
@@ -228,7 +283,13 @@ fn persist_bundle(store: &Store, bundle: &Bundle) -> anyhow::Result<()> {
     match &bundle.payload {
         BundlePayload::Vitals(observations) => {
             let fhir: Vec<_> = observations.iter().map(tgw_fhir::to_fhir_json).collect();
-            store.complete_vitals(bundle.id, &fhir, &received_at)?;
+            // Fix 1c: compute advisory plausibility flags per observation at ingest. This is
+            // additive metadata — it never changes whether the observation is stored.
+            let flags: Vec<Vec<String>> = observations
+                .iter()
+                .map(tgw_fhir::plausibility_flags)
+                .collect();
+            store.complete_vitals(bundle.id, &fhir, &flags, &received_at)?;
         }
         BundlePayload::Image {
             mime,
@@ -258,9 +319,14 @@ fn on_complete(bundle: &Bundle) {
                     loinc = %obs.loinc,
                     "gateway: decoded vitals observation (no PHI values logged)"
                 );
-                let fhir = tgw_fhir::to_fhir_json(obs);
-                let pretty = serde_json::to_string_pretty(&fhir).unwrap_or_default();
-                println!("{pretty}");
+                // PHI: the decoded Observation carries patient values. Never print it by
+                // default (stdout is captured by journald/containers — that would leak PHI,
+                // contradicting the no-PHI-in-logs posture). Opt in only for local demos.
+                if std::env::var_os("TGW_PRINT_FHIR").is_some() {
+                    let fhir = tgw_fhir::to_fhir_json(obs);
+                    let pretty = serde_json::to_string_pretty(&fhir).unwrap_or_default();
+                    println!("{pretty}");
+                }
             }
         }
         BundlePayload::Image { mime, data, .. } => {
@@ -277,19 +343,19 @@ fn on_complete(bundle: &Bundle) {
 // --- HTTP handlers ---------------------------------------------------------------------
 
 async fn get_observations(State(state): State<AppState>) -> Response {
-    // PHASE-B: serve the mock fixture. PHASE-F: back this with the redb store.
+    // Mock router: serve the static fixture. The live path is `get_observations_store`.
     serve_mock(&state, "observations.json").await
 }
 
 async fn get_queue(State(state): State<AppState>) -> Response {
-    // PHASE-B: serve the mock fixture. PHASE-F: back this with live queue state.
+    // Mock router: serve the static fixture. The live path is `get_queue_store`.
     serve_mock(&state, "queue.json").await
 }
 
 async fn get_image(Path(bundle_id): Path<String>, State(_state): State<AppState>) -> Response {
-    // TODO(PHASE-F): read image bytes from the redb store; set the correct Content-Type.
-    tracing::debug!(%bundle_id, "image requested (not available in scaffold)");
-    (StatusCode::NOT_FOUND, "image not available in scaffold").into_response()
+    // Mock router has no image bytes; the live path is `get_image_store` (redb-backed).
+    tracing::debug!(%bundle_id, "image requested on the mock router (no store)");
+    (StatusCode::NOT_FOUND, "image not available in mock mode").into_response()
 }
 
 /// Demo-only sink: reads the body and returns 200, for the failing-`curl` comparison.
@@ -373,19 +439,24 @@ fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
                 let observations = store.get_observations(id)?.ok_or_else(|| {
                     anyhow::anyhow!("delivered vitals bundle {id} is missing FHIR data")
                 })?;
-                for fhir_json in observations {
+                // Fix 1c: plausibility flags, index-aligned with the observations. Absent for
+                // bundles stored before flags existed → treated as "no flags".
+                let flags = store.get_flags(id)?.unwrap_or_default();
+                for (i, fhir_json) in observations.into_iter().enumerate() {
                     let patient_id = fhir_json
                         .get("subject")
                         .and_then(|subject| subject.get("reference"))
                         .and_then(|reference| reference.as_str())
                         .and_then(|reference| reference.strip_prefix("Patient/"))
                         .unwrap_or_default();
+                    let obs_flags = flags.get(i).cloned().unwrap_or_default();
                     items.push(json!({
                         "bundle_id": id.to_string(),
                         "received_at": received_at,
                         "patient_id": patient_id,
                         "kind": "vitals",
                         "summary": format_summary(&fhir_json),
+                        "flags": obs_flags,
                         "fhir": fhir_json,
                     }));
                 }
@@ -394,12 +465,15 @@ fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
                 let patient_id = store.get_image_patient(id)?.ok_or_else(|| {
                     anyhow::anyhow!("delivered image bundle {id} is missing patient data")
                 })?;
+                let image_url = format!("/api/images/{id}");
+                let mime = store.get_image_mime(id)?.unwrap_or_default();
                 items.push(json!({
                     "bundle_id": id.to_string(),
                     "received_at": received_at,
                     "patient_id": patient_id,
                     "kind": "image",
-                    "image_url": format!("/api/images/{}", id),
+                    "image_url": image_url,
+                    "fhir": tgw_fhir::image_media_json(&patient_id, &mime, &image_url),
                 }));
             }
             _ => {}

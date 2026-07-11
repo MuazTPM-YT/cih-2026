@@ -19,4 +19,5 @@ lz4_flex.workspace = true
 chacha20poly1305.workspace = true
 raptorq.workspace = true
 rand.workspace = true
+sha2.workspace = true
 toml.workspace = true

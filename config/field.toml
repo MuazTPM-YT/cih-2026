@@ -21,3 +21,14 @@ key_file = "./keys/device-a.key"      # 32-byte PSK; generate with `tgw-field ke
 
 [media]
 image_max_bytes = 30000    # JPEG recompression target for photos
+
+# [relay] — peer-relay fallback (Fix 2). OPTIONAL; omit the whole section to keep it disabled.
+# When enabled, if the direct gateway link yields no receipt within the retry budget, the
+# device hands its STILL-SEALED bundle to a nearby peer to forward. The relay peer only ever
+# holds ciphertext — it can neither decrypt the payload nor forge a receipt.
+# [relay]
+# enabled = false
+# discovery_addr = "255.255.255.255:47555"  # subnet broadcast for presence announcements
+# relay_listen_addr = "192.168.1.11:47556"  # THIS device's reachable LAN addr (not 0.0.0.0)
+# announce_interval_ms = 2000
+# peer_ttl_ms = 8000

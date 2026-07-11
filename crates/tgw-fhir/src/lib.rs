@@ -4,7 +4,8 @@
 //! build.fhir.org (that serves the R6 ballot; see docs/DECISIONS.md). The gateway is the
 //! FHIR boundary: it emits genuine R5 JSON while the wire format stays compact.
 //!
-//! Implement `to_fhir_json` in **Phase A** of tasks/twaha-agent-prompt.md.
+//! [`to_fhir_json`] maps vitals to an R5 `Observation`; [`image_media_json`] maps a delivered
+//! image to an R5 `Media` resource. The executable spec is in `tests/r5_contract.rs`.
 
 use time::format_description::well_known::Rfc3339;
 
@@ -62,6 +63,24 @@ pub fn to_fhir_json(obs: &VitalsObservation) -> Value {
     root
 }
 
+/// Convert a delivered image bundle into a FHIR R5 `Media` resource as JSON.
+///
+/// The wire model carries no image→observation link, so a true `Observation.derivedFrom`
+/// has nothing to reference; a `Media` resource is the standards-honest representation of a
+/// standalone clinical image. Emits `resourceType: "Media"`, `status: "completed"`, the
+/// patient `subject`, and a `content` attachment pointing at the gateway's image URL.
+pub fn image_media_json(patient_id: &str, mime: &str, image_url: &str) -> Value {
+    json!({
+        "resourceType": "Media",
+        "status": "completed",
+        "subject": { "reference": format!("Patient/{patient_id}") },
+        "content": {
+            "contentType": mime,
+            "url": image_url,
+        },
+    })
+}
+
 /// Build a single `coding` object: `{ system: LOINC, code: <loinc> }`.
 ///
 /// The free-text `display` string is intentionally omitted — it is not part of the coded
@@ -108,4 +127,115 @@ fn display_unit(ucum: &str) -> String {
     ucum.chars().filter(|ch| *ch != '[' && *ch != ']').collect()
 }
 
-// The verification suite lives in `tests/r5_contract.rs` (the executable spec for Phase A).
+// ---------------------------------------------------------------------------------------
+// Clinical plausibility (Fix 1c) — additive flagging, never rejection.
+// ---------------------------------------------------------------------------------------
+//
+// AEAD proves the bytes arrived intact; it says nothing about whether the sensor reading is
+// physiologically sane. `plausibility_flags` runs after decrypt + FHIR mapping and returns a
+// list of advisory flags. An out-of-range or inconsistent value is NEVER dropped or refused —
+// it is stored and surfaced with its flags so the dashboard can mark it "verify" without ever
+// hiding a possibly-real emergency reading.
+//
+// !!! EVERY numeric bound below is a PLACEHOLDER and is marked `NEEDS CLINICIAN REVIEW`. These
+// are engineering guesses at "physically possible at all," not validated clinical thresholds,
+// and MUST be signed off by a clinician before use on a real patient.
+
+/// Heart-rate plausible bounds in beats/min (LOINC 8867-4).
+// NEEDS CLINICIAN REVIEW: placeholder physiological bounds, not a clinical alarm range.
+const HEART_RATE_MIN: f64 = 20.0;
+// NEEDS CLINICIAN REVIEW
+const HEART_RATE_MAX: f64 = 300.0;
+
+/// Oxygen-saturation plausible bounds in percent (LOINC 59408-5).
+// NEEDS CLINICIAN REVIEW: below ~50% is rarely measurable/survivable; above 100% is impossible.
+const SPO2_MIN: f64 = 50.0;
+// NEEDS CLINICIAN REVIEW
+const SPO2_MAX: f64 = 100.0;
+
+/// Systolic plausible bounds in mmHg (LOINC 8480-6).
+// NEEDS CLINICIAN REVIEW
+const SYSTOLIC_MIN: f64 = 40.0;
+// NEEDS CLINICIAN REVIEW
+const SYSTOLIC_MAX: f64 = 300.0;
+
+/// Diastolic plausible bounds in mmHg (LOINC 8462-4).
+// NEEDS CLINICIAN REVIEW
+const DIASTOLIC_MIN: f64 = 20.0;
+// NEEDS CLINICIAN REVIEW
+const DIASTOLIC_MAX: f64 = 200.0;
+
+/// Compute advisory plausibility flags for one observation.
+///
+/// Returns an empty vector for a clean, in-range, internally-consistent reading, and for any
+/// LOINC code without a defined range (no opinion is offered rather than a false alarm). The
+/// caller stores these flags alongside the observation; they are additive metadata and must
+/// never gate persistence or produce an API error.
+#[must_use]
+pub fn plausibility_flags(obs: &VitalsObservation) -> Vec<String> {
+    let mut flags = Vec::new();
+    match obs.loinc.as_str() {
+        // Blood-pressure panel: validate each component and their mutual consistency.
+        "85354-9" => {
+            let systolic = component_value(obs, "8480-6");
+            let diastolic = component_value(obs, "8462-4");
+            match systolic {
+                Some(s) if !in_range(s, SYSTOLIC_MIN, SYSTOLIC_MAX) => {
+                    flags.push("systolic-out-of-range".to_string());
+                }
+                None => flags.push("missing-systolic".to_string()),
+                _ => {}
+            }
+            match diastolic {
+                Some(d) if !in_range(d, DIASTOLIC_MIN, DIASTOLIC_MAX) => {
+                    flags.push("diastolic-out-of-range".to_string());
+                }
+                None => flags.push("missing-diastolic".to_string()),
+                _ => {}
+            }
+            if let (Some(s), Some(d)) = (systolic, diastolic)
+                && s <= d
+            {
+                flags.push("systolic-not-greater-than-diastolic".to_string());
+            }
+        }
+        "8867-4" => flag_single(
+            obs,
+            HEART_RATE_MIN,
+            HEART_RATE_MAX,
+            "heart-rate",
+            &mut flags,
+        ),
+        "59408-5" => flag_single(obs, SPO2_MIN, SPO2_MAX, "spo2", &mut flags),
+        "8480-6" => flag_single(obs, SYSTOLIC_MIN, SYSTOLIC_MAX, "systolic", &mut flags),
+        "8462-4" => flag_single(obs, DIASTOLIC_MIN, DIASTOLIC_MAX, "diastolic", &mut flags),
+        // No defined plausible range for this code: offer no opinion, never reject.
+        _ => {}
+    }
+    flags
+}
+
+/// Flag a single-valued observation: missing value, or value outside `[min, max]`.
+fn flag_single(obs: &VitalsObservation, min: f64, max: f64, name: &str, flags: &mut Vec<String>) {
+    match obs.value.as_ref().map(|m| m.value) {
+        Some(v) if !in_range(v, min, max) => flags.push(format!("{name}-out-of-range")),
+        None => flags.push(format!("{name}-missing-value")),
+        _ => {}
+    }
+}
+
+/// The numeric value of the panel component with LOINC `loinc`, if present.
+fn component_value(obs: &VitalsObservation, loinc: &str) -> Option<f64> {
+    obs.components
+        .iter()
+        .find(|c| c.loinc == loinc)
+        .map(|c| c.value.value)
+}
+
+/// Inclusive range check that also rejects NaN (`NaN` fails both comparisons).
+fn in_range(value: f64, min: f64, max: f64) -> bool {
+    value >= min && value <= max
+}
+
+// The FHIR-mapping verification suite lives in `tests/r5_contract.rs`; the plausibility spec
+// lives in `tests/plausibility.rs`.
