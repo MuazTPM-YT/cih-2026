@@ -1,7 +1,4 @@
-# PLACEHOLDER — the [workspace] table is owned by Muaz (muaz/core) per tasks/CONTRACTS.md.
-# Scaffolded so Twaha's crates compile against frozen Contract 1 from minute one.
-# When Muaz's real workspace lands, HIS branch is authoritative — reconcile, don't clobber.
-#
+# Workspace manifest — OWNER: Muaz (muaz/core) per tasks/CONTRACTS.md.
 # The root [package]/[dev-dependencies]/tests target below is Twaha's (the integration test).
 
 [workspace]
@@ -40,6 +37,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 sha2 = "0.10"
+toml = "1"
+
+# Lightweight-binary constraint (ARCHITECTURE.md §8): static-friendly release profile.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
 
 # --- root package: hosts the workspace integration test (tests/) — OWNER: Twaha ---
 [package]
