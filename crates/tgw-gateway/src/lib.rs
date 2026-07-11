@@ -37,6 +37,8 @@ mod store;
 /// Redb-backed persistence for delivered bundles and gateway queue state.
 pub use store::Store;
 
+pub mod pairing;
+
 /// Maximum UDP datagram the gateway buffers (fits a 65535-byte IP payload).
 const MAX_DATAGRAM: usize = 65_535;
 
