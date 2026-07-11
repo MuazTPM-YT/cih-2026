@@ -6,9 +6,10 @@
 //!
 //! Implement `to_fhir_json` in **Phase A** of tasks/twaha-agent-prompt.md.
 
-use serde_json::{Value, json};
-use tgw_core::{Component, Measure, VitalsObservation};
 use time::format_description::well_known::Rfc3339;
+
+use serde_json::{json, Value};
+use tgw_core::{Component, Measure, VitalsObservation};
 
 /// LOINC coding system URL (`code.coding[].system` for clinical codes).
 const LOINC_SYSTEM: &str = "http://loinc.org";
@@ -69,7 +70,20 @@ fn loinc_coding(loinc: &str) -> Value {
     json!({
         "system": LOINC_SYSTEM,
         "code": loinc,
+        "display": loinc_display(loinc),
     })
+}
+
+/// Return the fixture-defined display text for the supported clinical LOINC codes.
+fn loinc_display(loinc: &str) -> Option<&'static str> {
+    match loinc {
+        "85354-9" => Some("Blood pressure panel with all children optional"),
+        "8480-6" => Some("Systolic blood pressure"),
+        "8462-4" => Some("Diastolic blood pressure"),
+        "59408-5" => Some("Oxygen saturation in Arterial blood by Pulse oximetry"),
+        "8867-4" => Some("Heart rate"),
+        _ => None,
+    }
 }
 
 /// Build a FHIR `valueQuantity`: `{ value, unit, system: UCUM, code: <UCUM> }`.
