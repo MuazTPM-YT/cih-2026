@@ -62,6 +62,24 @@ pub fn to_fhir_json(obs: &VitalsObservation) -> Value {
     root
 }
 
+/// Convert a delivered image bundle into a FHIR R5 `Media` resource as JSON.
+///
+/// The wire model carries no image→observation link, so a true `Observation.derivedFrom`
+/// has nothing to reference; a `Media` resource is the standards-honest representation of a
+/// standalone clinical image. Emits `resourceType: "Media"`, `status: "completed"`, the
+/// patient `subject`, and a `content` attachment pointing at the gateway's image URL.
+pub fn image_media_json(patient_id: &str, mime: &str, image_url: &str) -> Value {
+    json!({
+        "resourceType": "Media",
+        "status": "completed",
+        "subject": { "reference": format!("Patient/{patient_id}") },
+        "content": {
+            "contentType": mime,
+            "url": image_url,
+        },
+    })
+}
+
 /// Build a single `coding` object: `{ system: LOINC, code: <loinc> }`.
 ///
 /// The free-text `display` string is intentionally omitted — it is not part of the coded

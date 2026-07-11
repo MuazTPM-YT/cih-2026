@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 use tgw_core::{Component, Measure, VitalsObservation};
-use tgw_fhir::to_fhir_json;
+use tgw_fhir::{image_media_json, to_fhir_json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::datetime;
@@ -259,4 +259,16 @@ fn valueless_observation_does_not_panic_and_stays_valid() {
     // With no measurement, it must NOT fabricate a value.
     assert!(f.get("valueQuantity").is_none());
     assert!(f.get("component").is_none());
+}
+
+// --- images map to a FHIR Media resource (the standards-honest linkage) --------------------
+
+#[test]
+fn image_maps_to_fhir_media_resource() {
+    let media = image_media_json("P-1023", "image/jpeg", "/api/images/abc-123");
+    assert_eq!(media["resourceType"], "Media");
+    assert_eq!(media["status"], "completed");
+    assert_eq!(media["subject"]["reference"], "Patient/P-1023");
+    assert_eq!(media["content"]["contentType"], "image/jpeg");
+    assert_eq!(media["content"]["url"], "/api/images/abc-123");
 }

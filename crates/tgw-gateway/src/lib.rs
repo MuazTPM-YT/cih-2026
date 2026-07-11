@@ -429,12 +429,15 @@ fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
                 let patient_id = store.get_image_patient(id)?.ok_or_else(|| {
                     anyhow::anyhow!("delivered image bundle {id} is missing patient data")
                 })?;
+                let image_url = format!("/api/images/{id}");
+                let mime = store.get_image_mime(id)?.unwrap_or_default();
                 items.push(json!({
                     "bundle_id": id.to_string(),
                     "received_at": received_at,
                     "patient_id": patient_id,
                     "kind": "image",
-                    "image_url": format!("/api/images/{}", id),
+                    "image_url": image_url,
+                    "fhir": tgw_fhir::image_media_json(&patient_id, &mime, &image_url),
                 }));
             }
             _ => {}
