@@ -7,6 +7,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod breaker;
 pub mod discovery;
 pub mod pacer;
 pub mod queue;

@@ -10,6 +10,16 @@ overhead_factor = 1.4      # first-burst repair margin for ~25% loss
 nack_timeout_ms = 2000     # receiver decode-stall trigger
 retry_backoff_ms = 3000    # re-burst schedule
 max_retries = 8            # then mark the bundle 'stuck' (never silently dropped)
+# The knobs below are OPTIONAL (each has a built-in default); shown here for tuning.
+circuit_breaker_threshold = 3   # Fix F4: consecutive STUCK bundles that trip the dead-link
+                                # breaker; then bundles are probed with a 1-retry budget so a
+                                # blackout reaches STUCK fast instead of burning the full budget
+                                # per bundle. 0 disables the breaker. Any delivery resets it.
+circuit_cooldown_ms = 5000      # Fix F4: idle wait between probes once the breaker is tripped.
+stuck_retry_backoff_ms = 15000  # Fix F1: how long a bundle sits STUCK before the daemon auto
+                                # re-arms it for another delivery pass (incl. peer-relay failover).
+max_stuck_retries = 5           # Fix F1: cap on daemon auto re-arm passes; past this the bundle
+                                # stays STUCK (kept, visible) until `tgw-field requeue` is run.
 
 [net]
 gateway_addr = "192.168.1.50:47000"   # where the gateway (or netsim) listens
@@ -28,7 +38,9 @@ image_max_bytes = 30000    # JPEG recompression target for photos
 # holds ciphertext — it can neither decrypt the payload nor forge a receipt.
 # [relay]
 # enabled = false
-# discovery_addr = "255.255.255.255:47555"  # subnet broadcast for presence announcements
-# relay_listen_addr = "192.168.1.11:47556"  # THIS device's reachable LAN addr (not 0.0.0.0)
+# discovery_addr = "239.255.7.66:47555"      # site-local multicast group (default); joined with
+#                                            # loopback so two instances on ONE host converge too.
+#                                            # A subnet broadcast ("255.255.255.255:47555") also works.
+# relay_listen_addr = "192.168.1.11:47556"   # THIS device's reachable LAN addr (not 0.0.0.0)
 # announce_interval_ms = 2000
 # peer_ttl_ms = 8000

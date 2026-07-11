@@ -34,6 +34,7 @@ fn retry() -> RetryConfig {
         nack_timeout_ms: 150,
         retry_backoff_ms: 400,
         max_retries: 8,
+        ..RetryConfig::default()
     }
 }
 
@@ -194,6 +195,7 @@ async fn silent_gateway_yields_stuck_not_hang() {
         nack_timeout_ms: 50,
         retry_backoff_ms: 50,
         max_retries: 2,
+        ..RetryConfig::default()
     };
 
     let outcome = deliver(
@@ -241,6 +243,7 @@ async fn preemption_probe_pauses_image_transfer() {
         nack_timeout_ms: 50,
         retry_backoff_ms: 50,
         max_retries: 8,
+        ..RetryConfig::default()
     };
 
     // "Vitals arrived" from the first probe onward.

@@ -5,6 +5,10 @@
 //! UCUM units throughout so the gateway's FHIR R5 mapping is lossless.
 
 use anyhow::{Context, Result, anyhow, bail};
+use tgw_core::clinical::{
+    INPUT_DIASTOLIC_MAX, INPUT_DIASTOLIC_MIN, INPUT_PULSE_MAX, INPUT_PULSE_MIN, INPUT_SPO2_MAX,
+    INPUT_SPO2_MIN, INPUT_SYSTOLIC_MAX, INPUT_SYSTOLIC_MIN,
+};
 use tgw_core::{Component, Measure, VitalsObservation};
 use time::OffsetDateTime;
 
@@ -73,7 +77,7 @@ pub fn build_observations(input: &VitalsInput) -> Result<Vec<VitalsObservation>>
         observations.push(obs);
     }
     if let Some(spo2) = input.spo2 {
-        if !(0.0..=100.0).contains(&spo2) {
+        if !(INPUT_SPO2_MIN..=INPUT_SPO2_MAX).contains(&spo2) {
             bail!("--spo2 must be a percentage in 0–100, got {spo2}");
         }
         let mut obs = base(LOINC_SPO2);
@@ -84,7 +88,7 @@ pub fn build_observations(input: &VitalsInput) -> Result<Vec<VitalsObservation>>
         observations.push(obs);
     }
     if let Some(pulse) = input.pulse {
-        if !(0.0..=400.0).contains(&pulse) {
+        if !(INPUT_PULSE_MIN..=INPUT_PULSE_MAX).contains(&pulse) {
             bail!("--pulse must be in 0–400 bpm, got {pulse}");
         }
         let mut obs = base(LOINC_PULSE);
@@ -114,7 +118,9 @@ fn parse_bp(bp: &str) -> Result<(f64, f64)> {
         .trim()
         .parse()
         .with_context(|| format!("diastolic part of --bp {bp:?}"))?;
-    if !(20.0..=350.0).contains(&systolic) || !(10.0..=250.0).contains(&diastolic) {
+    if !(INPUT_SYSTOLIC_MIN..=INPUT_SYSTOLIC_MAX).contains(&systolic)
+        || !(INPUT_DIASTOLIC_MIN..=INPUT_DIASTOLIC_MAX).contains(&diastolic)
+    {
         bail!("--bp {bp:?} is outside plausible clinical bounds");
     }
     if diastolic >= systolic {

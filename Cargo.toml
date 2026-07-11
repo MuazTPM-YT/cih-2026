@@ -38,6 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 sha2 = "0.10"
 toml = "1"
+socket2 = { version = "0.5", features = ["all"] }
 
 # Lightweight-binary constraint (ARCHITECTURE.md §8): static-friendly release profile.
 [profile.release]

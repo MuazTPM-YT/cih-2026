@@ -190,6 +190,7 @@ async fn direct_path_100pct_loss_via_netsim_is_stuck_then_relay_delivers() {
         nack_timeout_ms: 50,
         retry_backoff_ms: 60,
         max_retries: 2,
+        ..RetryConfig::default()
     };
     let direct = deliver(
         &field_sock,
@@ -218,6 +219,60 @@ async fn direct_path_100pct_loss_via_netsim_is_stuck_then_relay_delivers() {
         "failover via relay must deliver"
     );
     assert!(store.is_delivered(bundle.id).expect("is_delivered"));
+}
+
+/// Fix F3 — two discovery instances co-bound on one host must find each other. This is the case
+/// the stress harness could not prove on the old code (plain `UdpSocket` bind with no
+/// `SO_REUSEPORT`, and a self-filter keyed on the shared `0.0.0.0:…` relay address). We run two
+/// `run_discovery` loops on the same multicast group/port and assert both `PeerTable`s converge.
+#[tokio::test]
+async fn two_discovery_instances_on_one_host_find_each_other() {
+    use std::time::Instant;
+
+    use tgw_field::discovery::{PeerTable, run_discovery};
+
+    // Share one multicast group + port; the ephemeral port keeps parallel test runs from colliding.
+    let port = free_addr().await.port();
+    let group = format!("239.255.7.66:{port}");
+    let interval = Duration::from_millis(100);
+
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    let addr_a = "127.0.0.1:47601";
+    let addr_b = "127.0.0.1:47602";
+
+    let table_a = PeerTable::new(Duration::from_secs(30));
+    let table_b = PeerTable::new(Duration::from_secs(30));
+
+    {
+        let (g, t) = (group.clone(), table_a.clone());
+        tokio::spawn(async move {
+            let _ = run_discovery(&g, id_a, addr_a, interval, t).await;
+        });
+    }
+    {
+        let (g, t) = (group.clone(), table_b.clone());
+        tokio::spawn(async move {
+            let _ = run_discovery(&g, id_b, addr_b, interval, t).await;
+        });
+    }
+
+    let mut converged = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = Instant::now();
+        let a_sees_b = table_a.active(now).iter().any(|p| p == addr_b);
+        let b_sees_a = table_b.active(now).iter().any(|p| p == addr_a);
+        if a_sees_b && b_sees_a {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "two daemons on one host must discover each other (Fix F3: SO_REUSEPORT + instance-id \
+         self-filter + multicast loopback)"
+    );
 }
 
 #[tokio::test]

@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use tgw_core::{Bundle, BundleSender, Config, FecConfig, Key};
+use tgw_core::{Bundle, BundleSender, Config, FecConfig, Key, RetryConfig};
 use tokio::net::UdpSocket;
 
+use tgw_field::breaker::{BreakerEvent, LinkBreaker, probe_budget};
 use tgw_field::discovery::{PeerTable, run_discovery};
 use tgw_field::pacer::Pacer;
 use tgw_field::queue::{BundleState, Queue, QueuedBundle};
@@ -89,6 +90,15 @@ enum Command {
         #[arg(long)]
         watch: bool,
     },
+    /// Move STUCK bundle(s) back to queued so the daemon retries them (Fix F1). Pass a bundle
+    /// id (full or 8-char short prefix) or `--all`.
+    Requeue {
+        /// The bundle id to requeue (full UUID, or its 8-char `status` short id).
+        id: Option<String>,
+        /// Requeue every stuck bundle.
+        #[arg(long)]
+        all: bool,
+    },
     /// Run continuously: drain the queue, resume interrupted transfers, serve NACKs.
     Daemon,
 }
@@ -134,7 +144,56 @@ async fn main() -> Result<()> {
             enqueue_and_drain(&cli.config, bundle).await
         }
         Command::Status { watch } => status(&cli.config, watch).await,
+        Command::Requeue { id, all } => requeue_cmd(id, all),
         Command::Daemon => daemon(&cli.config).await,
+    }
+}
+
+/// Fix F1 — move stuck bundle(s) back to queued so the daemon retries them. Local queue edit
+/// only; needs no config or key.
+fn requeue_cmd(id: Option<String>, all: bool) -> Result<()> {
+    let queue = Queue::open(&queue_path())?;
+    if all {
+        let n = queue.requeue_all_stuck()?;
+        println!("requeued {n} stuck bundle(s) — start `tgw-field daemon` to deliver them");
+        return Ok(());
+    }
+    let Some(needle) = id else {
+        bail!("provide a bundle id (full UUID or 8-char short id) or `--all`");
+    };
+    let target = resolve_bundle_id(&queue, &needle)?;
+    if queue.requeue(target)? {
+        println!(
+            "bundle {} requeued — start `tgw-field daemon` to deliver it",
+            short_id(target)
+        );
+        Ok(())
+    } else {
+        bail!(
+            "bundle {} is not STUCK — nothing to requeue",
+            short_id(target)
+        )
+    }
+}
+
+/// Resolve a full UUID or an 8-char `status` short id against the queue to a single bundle id.
+fn resolve_bundle_id(queue: &Queue, needle: &str) -> Result<uuid::Uuid> {
+    if let Ok(uuid) = uuid::Uuid::parse_str(needle) {
+        return Ok(uuid);
+    }
+    let matches: Vec<uuid::Uuid> = queue
+        .list()?
+        .into_iter()
+        .map(|r| r.id)
+        .filter(|id| short_id(*id) == needle || id.to_string().starts_with(needle))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(*one),
+        [] => bail!("no bundle matches id {needle:?} (see `tgw-field status`)"),
+        _ => bail!(
+            "id {needle:?} is ambiguous — {} bundles match",
+            matches.len()
+        ),
     }
 }
 
@@ -252,7 +311,18 @@ async fn drain_queue(
     let mut pacer = Pacer::new(config.link.bandwidth_bps, PACER_BURST_BYTES);
 
     while let Some(record) = queue.next_sendable()? {
-        deliver_one(config, key, queue, &socket, &mut pacer, &record, peers).await?;
+        // One-shot drain uses the full retry budget; the F4 breaker is a daemon-loop concern.
+        deliver_one(
+            config,
+            key,
+            queue,
+            &socket,
+            &mut pacer,
+            &record,
+            peers,
+            &config.retry,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -268,6 +338,10 @@ async fn open_socket(config: &Config) -> Result<UdpSocket> {
     Ok(socket)
 }
 
+// The delivery path legitimately threads config, key, queue, socket, pacer, the record, the
+// discovered peers, and the (F4-adjustable) retry budget; grouping them into a struct would only
+// obscure a straight-line function.
+#[allow(clippy::too_many_arguments)]
 async fn deliver_one(
     config: &Config,
     key: &Key,
@@ -276,7 +350,8 @@ async fn deliver_one(
     pacer: &mut Pacer,
     record: &QueuedBundle,
     peers: Option<&PeerTable>,
-) -> Result<()> {
+    retry: &RetryConfig,
+) -> Result<Outcome> {
     let mut fec_sender =
         BundleSender::from_envelope(record.id, &record.envelope, key, &config.fec())
             .context("rebuilding FEC sender from stored envelope")?;
@@ -293,15 +368,9 @@ async fn deliver_one(
     let preempt_probe = || is_image && queue.vitals_waiting().unwrap_or(false);
 
     let started = std::time::Instant::now();
-    let outcome = deliver(
-        socket,
-        &mut fec_sender,
-        pacer,
-        key,
-        &config.retry,
-        preempt_probe,
-    )
-    .await?;
+    // `retry` is the effective per-bundle budget for this pass: the full config schedule
+    // normally, or a shrunk 1-retry probe when the F4 breaker has tripped on a dead link.
+    let outcome = deliver(socket, &mut fec_sender, pacer, key, retry, preempt_probe).await?;
 
     match outcome {
         Outcome::Delivered => {
@@ -312,20 +381,22 @@ async fn deliver_one(
                 record.kind,
                 started.elapsed().as_secs_f64()
             );
+            Ok(Outcome::Delivered)
         }
         Outcome::Stuck => {
             // Fix 2: before flagging stuck, try to reach the gateway through a discovered peer.
             if try_relay_failover(config, key, queue, record, peers).await? {
-                return Ok(());
+                return Ok(Outcome::Delivered);
             }
             queue.bump_retries(record.id)?;
-            queue.set_state(record.id, BundleState::Stuck)?;
+            queue.mark_stuck(record.id, time::OffsetDateTime::now_utc())?;
             println!(
                 "bundle {}  [{}]  STUCK after {} retries — kept in queue, will retry in daemon mode",
                 short_id(record.id),
                 record.kind,
-                config.retry.max_retries
+                retry.max_retries
             );
+            Ok(Outcome::Stuck)
         }
         Outcome::Preempted => {
             queue.set_state(record.id, BundleState::Queued)?;
@@ -334,9 +405,9 @@ async fn deliver_one(
                 short_id(record.id),
                 record.kind
             );
+            Ok(Outcome::Preempted)
         }
     }
-    Ok(())
 }
 
 /// Attempt peer-relay failover for a bundle the direct link could not deliver. Returns `true`
@@ -405,13 +476,40 @@ async fn daemon(config_path: &Path) -> Result<()> {
         gateway = %config.net.gateway_addr,
         bandwidth_bps = config.link.bandwidth_bps,
         relay = config.relay.enabled,
+        circuit_breaker_threshold = config.retry.circuit_breaker_threshold,
         "field daemon up — draining queue continuously"
     );
+
+    // Fix F4: fast-fail on a dead link. The full budget is used until `circuit_breaker_threshold`
+    // consecutive bundles go stuck; then subsequent bundles are probed with a 1-retry budget and
+    // the idle wait stretches to `circuit_cooldown_ms`, so a blackout reaches STUCK fast instead
+    // of flogging every bundle at full budget. Any delivery restores the full budget.
+    let full_retry = config.retry.clone();
+    let probe_retry = probe_budget(&full_retry);
+    let mut breaker = LinkBreaker::new(config.retry.circuit_breaker_threshold);
+
+    let stuck_backoff = time::Duration::milliseconds(
+        i64::try_from(config.retry.stuck_retry_backoff_ms).unwrap_or(i64::MAX),
+    );
     loop {
+        // Fix F1: revive stuck bundles that have backed off long enough (bounded by the retry
+        // cap) so the daemon re-attempts them — including via peer-relay failover — instead of
+        // leaving them terminal after the single pass in which they first went stuck.
+        let rearmed = queue.rearm_stuck(
+            time::OffsetDateTime::now_utc(),
+            stuck_backoff,
+            config.retry.max_stuck_retries,
+        )?;
+        if rearmed > 0 {
+            tracing::info!(
+                rearmed,
+                "re-armed stuck bundle(s) for another delivery pass"
+            );
+        }
         match queue.next_sendable()? {
             Some(record) => {
-                // A stuck bundle re-enters via manual requeue; retries here are per-pass.
-                deliver_one(
+                let retry = breaker.budget(&full_retry, &probe_retry);
+                let outcome = deliver_one(
                     &config,
                     &key,
                     &queue,
@@ -419,10 +517,32 @@ async fn daemon(config_path: &Path) -> Result<()> {
                     &mut pacer,
                     &record,
                     peers.as_ref(),
+                    retry,
                 )
                 .await?;
+                match breaker.record(outcome) {
+                    BreakerEvent::Tripped => tracing::warn!(
+                        threshold = config.retry.circuit_breaker_threshold,
+                        cooldown_ms = config.retry.circuit_cooldown_ms,
+                        "F4 circuit breaker tripped — direct link treated as down; probing with a \
+                         reduced retry budget (bundles are still kept, never dropped)"
+                    ),
+                    BreakerEvent::Recovered => {
+                        tracing::info!("direct link recovered — restoring full retry budget")
+                    }
+                    BreakerEvent::Unchanged => {}
+                }
             }
-            None => tokio::time::sleep(Duration::from_millis(500)).await,
+            None => {
+                // Idle wait: a long cool-down while the link is down (nothing to send and the
+                // breaker is tripped), otherwise the normal snappy poll.
+                let idle_ms = if breaker.is_tripped() {
+                    config.retry.circuit_cooldown_ms.max(1)
+                } else {
+                    500
+                };
+                tokio::time::sleep(Duration::from_millis(idle_ms)).await;
+            }
         }
     }
 }
@@ -438,13 +558,23 @@ fn start_relay_services(config: &Config) -> Option<PeerTable> {
     }
     let table = PeerTable::new(Duration::from_millis(config.relay.peer_ttl_ms));
 
+    // Per-run instance id: self-filters our own announces without depending on the (often shared,
+    // `0.0.0.0:…`) relay-listen address string. See discovery.rs (Fix F3).
+    let instance_id = uuid::Uuid::new_v4();
     let discovery_addr = config.relay.discovery_addr.clone();
     let own_relay_addr = config.relay.relay_listen_addr.clone();
     let interval = Duration::from_millis(config.relay.announce_interval_ms.max(1));
     let discovery_table = table.clone();
+    tracing::info!(%instance_id, discovery = %discovery_addr, "peer discovery starting");
     tokio::spawn(async move {
-        if let Err(e) =
-            run_discovery(&discovery_addr, &own_relay_addr, interval, discovery_table).await
+        if let Err(e) = run_discovery(
+            &discovery_addr,
+            instance_id,
+            &own_relay_addr,
+            interval,
+            discovery_table,
+        )
+        .await
         {
             tracing::warn!(error = %e, "peer discovery stopped");
         }

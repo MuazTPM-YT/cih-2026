@@ -28,7 +28,7 @@ pub struct LinkConfig {
     pub overhead_factor: f32,
 }
 
-/// `[retry]` — NACK/re-burst schedule.
+/// `[retry]` — NACK/re-burst schedule and dead-link fast-fail (Fix F4).
 #[derive(Debug, Clone, Deserialize)]
 pub struct RetryConfig {
     /// Receiver decode-stall trigger for emitting a NACK (milliseconds).
@@ -37,6 +37,61 @@ pub struct RetryConfig {
     pub retry_backoff_ms: u64,
     /// Re-burst attempts before a bundle is flagged `stuck` (never silently dropped).
     pub max_retries: u32,
+    /// Fix F4 — consecutive `stuck` bundles that trip the circuit breaker. Once tripped, the
+    /// daemon treats the link as down and probes subsequent bundles with a 1-retry budget plus
+    /// a cool-down instead of burning the full linear budget on every bundle. Any delivery
+    /// resets the counter and restores the full budget. `#[serde(default)]` keeps existing
+    /// Contract-4 configs parsing unchanged.
+    #[serde(default = "default_circuit_breaker_threshold")]
+    pub circuit_breaker_threshold: u32,
+    /// Fix F4 — cool-down between probes once the breaker is tripped (milliseconds).
+    #[serde(default = "default_circuit_cooldown_ms")]
+    pub circuit_cooldown_ms: u64,
+    /// Fix F1 — how long a bundle must sit `stuck` before the daemon auto-re-arms it for another
+    /// delivery pass (milliseconds). Paces daemon retries so a flapping link is not hammered.
+    #[serde(default = "default_stuck_retry_backoff_ms")]
+    pub stuck_retry_backoff_ms: u64,
+    /// Fix F1 — cap on daemon auto-re-arm passes for a single bundle. Once a bundle's `retries`
+    /// reaches this, it stays `stuck` (kept, visible, never dropped) until an operator requeues
+    /// it, so a genuinely dead link converges instead of spinning forever.
+    #[serde(default = "default_max_stuck_retries")]
+    pub max_stuck_retries: u32,
+}
+
+/// Default consecutive-stuck count that trips the F4 circuit breaker.
+fn default_circuit_breaker_threshold() -> u32 {
+    3
+}
+
+/// Default F4 cool-down between probes once the breaker is tripped (milliseconds).
+fn default_circuit_cooldown_ms() -> u64 {
+    5000
+}
+
+/// Default F1 backoff before the daemon auto-re-arms a stuck bundle (milliseconds).
+fn default_stuck_retry_backoff_ms() -> u64 {
+    15000
+}
+
+/// Default F1 cap on daemon auto-re-arm passes for a single bundle.
+fn default_max_stuck_retries() -> u32 {
+    5
+}
+
+impl Default for RetryConfig {
+    /// Production-shaped defaults (mirrors `config/field.toml`). Chiefly a convenience for tests
+    /// that build a `RetryConfig` literal and only care about a couple of fields.
+    fn default() -> Self {
+        RetryConfig {
+            nack_timeout_ms: 2000,
+            retry_backoff_ms: 3000,
+            max_retries: 8,
+            circuit_breaker_threshold: default_circuit_breaker_threshold(),
+            circuit_cooldown_ms: default_circuit_cooldown_ms(),
+            stuck_retry_backoff_ms: default_stuck_retry_backoff_ms(),
+            max_stuck_retries: default_max_stuck_retries(),
+        }
+    }
 }
 
 /// `[net]` — addresses.
@@ -75,7 +130,12 @@ pub struct MediaConfig {
 pub struct RelayConfig {
     /// Master switch for the peer-relay fallback.
     pub enabled: bool,
-    /// UDP broadcast address peers announce presence on, e.g. `"255.255.255.255:47555"`.
+    /// Address peers announce presence on. An administratively-scoped (site-local, 239.x)
+    /// **multicast** group (default) is joined with loopback delivery so co-located devices —
+    /// including two instances on one host — reliably hear each other; a plain subnet
+    /// **broadcast** address (e.g. `"255.255.255.255:47555"`) also works on a production LAN.
+    /// Absent a multicast router the group stays on the local segment, matching the one-hop,
+    /// same-area relay assumption. See discovery.rs.
     pub discovery_addr: String,
     /// Local UDP bind where this device accepts relay requests from peers.
     pub relay_listen_addr: String,
@@ -89,7 +149,7 @@ impl Default for RelayConfig {
     fn default() -> Self {
         RelayConfig {
             enabled: false,
-            discovery_addr: "255.255.255.255:47555".to_string(),
+            discovery_addr: "239.255.7.66:47555".to_string(),
             relay_listen_addr: "0.0.0.0:47556".to_string(),
             announce_interval_ms: 2000,
             peer_ttl_ms: 8000,
