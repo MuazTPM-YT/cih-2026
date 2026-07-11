@@ -1,0 +1,12 @@
+# PLACEHOLDER — owned by Muaz (muaz/core) per tasks/CONTRACTS.md.
+# Minimal stub so the workspace builds; Muaz implements the real field client.
+[package]
+name = "tgw-field"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tgw-core.workspace = true
+anyhow.workspace = true

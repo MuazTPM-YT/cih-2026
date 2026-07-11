@@ -1,0 +1,22 @@
+# OWNER: Twaha (twaha/gateway) per tasks/CONTRACTS.md — EXCEPT `static/` which is Jiya's.
+[package]
+name = "tgw-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tgw-core.workspace = true
+tgw-fhir.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

@@ -1,0 +1,64 @@
+# PLACEHOLDER — the [workspace] table is owned by Muaz (muaz/core) per tasks/CONTRACTS.md.
+# Scaffolded so Twaha's crates compile against frozen Contract 1 from minute one.
+# When Muaz's real workspace lands, HIS branch is authoritative — reconcile, don't clobber.
+#
+# The root [package]/[dev-dependencies]/tests target below is Twaha's (the integration test).
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# --- internal crates ---
+tgw-core = { path = "crates/tgw-core" }
+tgw-fhir = { path = "crates/tgw-fhir" }
+tgw-gateway = { path = "crates/tgw-gateway" }
+tgw-field = { path = "crates/tgw-field" }
+tgw-netsim = { path = "crates/tgw-netsim" }
+# --- external (versions verified in docs/RESEARCH_LOG.md, 2026-07-11) ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde-well-known", "formatting", "parsing", "macros"] }
+ciborium = "0.2.2"
+lz4_flex = "0.13"
+chacha20poly1305 = "0.11"
+raptorq = "2.0.1"
+redb = "4.1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "sync", "fs", "io-util", "signal"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+clap = { version = "4.6", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+sha2 = "0.10"
+
+# --- root package: hosts the workspace integration test (tests/) — OWNER: Twaha ---
+[package]
+name = "telemed-gw"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+tgw-core.workspace = true
+tgw-fhir.workspace = true
+tgw-gateway.workspace = true
+tgw-field.workspace = true
+tgw-netsim.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+time.workspace = true
+sha2.workspace = true
+anyhow.workspace = true

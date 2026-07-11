@@ -1,0 +1,23 @@
+# Gateway config sample — Contract 4 shape. OWNER: Twaha.
+# The gateway listens for DATA frames and serves the dashboard/API over HTTP.
+
+[link]
+bandwidth_bps = 56000      # informational on the gateway side
+symbol_size = 1100         # must match the field client
+overhead_factor = 1.4
+
+[retry]
+nack_timeout_ms = 2000     # when to emit a NACK for a stalled decode
+retry_backoff_ms = 3000
+max_retries = 8
+
+[net]
+gateway_addr = "192.168.1.50:47000"   # advertised address (informational)
+listen_addr = "0.0.0.0:47000"         # UDP bind for incoming DATA frames
+http_addr = "0.0.0.0:8080"            # dashboard + JSON API (Contract 3)
+
+[crypto]
+key_file = "./keys/device-a.key"      # same PSK as the paired field device
+
+[media]
+image_max_bytes = 30000

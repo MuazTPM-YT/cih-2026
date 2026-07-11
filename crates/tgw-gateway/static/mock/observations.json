@@ -1,0 +1,86 @@
+[
+  {
+    "bundle_id": "b1f2c3d4-0001-4a5b-8c6d-000000000001",
+    "received_at": "2026-07-11T14:03:22Z",
+    "patient_id": "P-1023",
+    "kind": "vitals",
+    "summary": "BP 142/95 mmHg · SpO2 91% · Pulse 108",
+    "fhir": {
+      "resourceType": "Observation",
+      "status": "final",
+      "code": {
+        "coding": [
+          {
+            "system": "http://loinc.org",
+            "code": "85354-9",
+            "display": "Blood pressure panel with all children optional"
+          }
+        ]
+      },
+      "subject": { "reference": "Patient/P-1023" },
+      "effectiveDateTime": "2026-07-11T14:03:22Z",
+      "performer": [{ "reference": "Practitioner/fieldworker-7" }],
+      "device": { "reference": "Device/field-bp-01" },
+      "component": [
+        {
+          "code": {
+            "coding": [
+              { "system": "http://loinc.org", "code": "8480-6", "display": "Systolic blood pressure" }
+            ]
+          },
+          "valueQuantity": {
+            "value": 142,
+            "unit": "mmHg",
+            "system": "http://unitsofmeasure.org",
+            "code": "mm[Hg]"
+          }
+        },
+        {
+          "code": {
+            "coding": [
+              { "system": "http://loinc.org", "code": "8462-4", "display": "Diastolic blood pressure" }
+            ]
+          },
+          "valueQuantity": {
+            "value": 95,
+            "unit": "mmHg",
+            "system": "http://unitsofmeasure.org",
+            "code": "mm[Hg]"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "bundle_id": "b1f2c3d4-0002-4a5b-8c6d-000000000002",
+    "received_at": "2026-07-11T14:02:05Z",
+    "patient_id": "P-1023",
+    "kind": "vitals",
+    "summary": "SpO2 91% · Pulse 108 bpm",
+    "fhir": {
+      "resourceType": "Observation",
+      "status": "final",
+      "code": {
+        "coding": [
+          { "system": "http://loinc.org", "code": "59408-5", "display": "Oxygen saturation in Arterial blood by Pulse oximetry" }
+        ]
+      },
+      "subject": { "reference": "Patient/P-1023" },
+      "effectiveDateTime": "2026-07-11T14:02:05Z",
+      "performer": [{ "reference": "Practitioner/fieldworker-7" }],
+      "valueQuantity": {
+        "value": 91,
+        "unit": "%",
+        "system": "http://unitsofmeasure.org",
+        "code": "%"
+      }
+    }
+  },
+  {
+    "bundle_id": "b1f2c3d4-0003-4a5b-8c6d-000000000003",
+    "received_at": "2026-07-11T14:01:10Z",
+    "patient_id": "P-1023",
+    "kind": "image",
+    "image_url": "/api/images/b1f2c3d4-0003-4a5b-8c6d-000000000003"
+  }
+]

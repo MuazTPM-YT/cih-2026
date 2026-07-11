@@ -1,0 +1,26 @@
+[
+  {
+    "bundle_id": "b1f2c3d4-0003-4a5b-8c6d-000000000003",
+    "state": "receiving",
+    "symbols_received": 120,
+    "symbols_needed": 260,
+    "first_seen": "2026-07-11T14:05:00Z",
+    "completed_at": null
+  },
+  {
+    "bundle_id": "b1f2c3d4-0001-4a5b-8c6d-000000000001",
+    "state": "receipt_sent",
+    "symbols_received": 41,
+    "symbols_needed": 38,
+    "first_seen": "2026-07-11T14:03:20Z",
+    "completed_at": "2026-07-11T14:03:22Z"
+  },
+  {
+    "bundle_id": "b1f2c3d4-0002-4a5b-8c6d-000000000002",
+    "state": "complete",
+    "symbols_received": 44,
+    "symbols_needed": 40,
+    "first_seen": "2026-07-11T14:02:02Z",
+    "completed_at": "2026-07-11T14:02:05Z"
+  }
+]

@@ -1,0 +1,23 @@
+# Field-client config sample — Contract 4 shape. OWNER: Twaha.
+# Copy and adjust per device. The PSK file is NEVER committed (see .gitignore).
+
+[link]
+bandwidth_bps = 56000      # pace below the 64 kbps ceiling
+symbol_size = 1100         # fit one UDP datagram under a 1500 MTU
+overhead_factor = 1.4      # first-burst repair margin for ~25% loss
+
+[retry]
+nack_timeout_ms = 2000     # receiver decode-stall trigger
+retry_backoff_ms = 3000    # re-burst schedule
+max_retries = 8            # then mark the bundle 'stuck' (never silently dropped)
+
+[net]
+gateway_addr = "192.168.1.50:47000"   # where the gateway (or netsim) listens
+listen_addr = "0.0.0.0:47000"         # local bind for return frames (receipts/NACKs)
+http_addr = "0.0.0.0:8080"            # unused on the field side; present for symmetry
+
+[crypto]
+key_file = "./keys/device-a.key"      # 32-byte PSK; generate with `tgw-field keygen`
+
+[media]
+image_max_bytes = 30000    # JPEG recompression target for photos

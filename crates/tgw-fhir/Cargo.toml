@@ -1,0 +1,13 @@
+# OWNER: Twaha (twaha/gateway) per tasks/CONTRACTS.md.
+[package]
+name = "tgw-fhir"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tgw-core.workspace = true
+serde_json.workspace = true
+time.workspace = true
+thiserror.workspace = true

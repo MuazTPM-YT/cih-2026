@@ -1,2 +1,18 @@
 /docs
 /tasks
+graphify-out/
+
+# Rust / build
+/target
+
+# Secrets — never commit keys (ARCHITECTURE.md §6). Demo keys via `tgw-field keygen`.
+/keys/
+*.key
+
+# Persistent stores (redb)
+*.redb
+field-queue.redb*
+gateway.redb*
+
+# Tooling artifacts
+.serena/

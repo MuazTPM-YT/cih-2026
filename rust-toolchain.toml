@@ -1,0 +1,4 @@
+# PLACEHOLDER — owned by Muaz (muaz/core) per tasks/CONTRACTS.md. Pin verified 2026-07-11.
+[toolchain]
+channel = "1.94"
+components = ["rustfmt", "clippy"]
