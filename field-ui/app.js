@@ -5,6 +5,9 @@
 
 const $form         = document.getElementById("capture-form");
 const $patientId    = document.getElementById("patient-id");
+const $patientName  = document.getElementById("patient-name");
+const $patientSex   = document.getElementById("patient-sex");
+const $patientAge   = document.getElementById("patient-age");
 const $vitalTemp    = document.getElementById("vital-temp");
 const $tempSite     = document.getElementById("temp-site");
 const $siteReq      = document.getElementById("site-req");
@@ -25,11 +28,30 @@ const $sentEmpty    = document.getElementById("sent-empty");
 let selectedImageFile = null;
 const sentItems = [];
 
+// --- Patient ID auto-generation ---
+const PATIENT_ID_KEY = "tgw-patient-counter";
+const PATIENT_ID_BASE = 1023;
+
+function nextPatientId() {
+  let n = PATIENT_ID_BASE;
+  try {
+    const stored = localStorage.getItem(PATIENT_ID_KEY);
+    if (stored) n = parseInt(stored, 10) || PATIENT_ID_BASE;
+    n += 1;
+    localStorage.setItem(PATIENT_ID_KEY, String(n));
+  } catch (_) { n += 1; }
+  return "P-" + n;
+}
+
 function init() {
   $form.addEventListener("submit", handleSubmit);
 
+  // Auto-generate the patient ID for this session
+  $patientId.value = nextPatientId();
+
   const validationInputs = [
-    $patientId, $vitalTemp, $vitalPulse, $vitalResp,
+    $patientName, $patientSex, $patientAge,
+    $vitalTemp, $vitalPulse, $vitalResp,
     $bpSys, $bpDia, $notes, $tempSite
   ];
   validationInputs.forEach(el => {
@@ -37,6 +59,12 @@ function init() {
   });
 
   $vitalTemp.addEventListener("input", updateTempSiteRequired);
+
+  // Numeric vital validation
+  setupVitalValidator($vitalTemp, "error-vital-temp", { min: 80, max: 115, label: "Temperature", decimals: 1 });
+  setupVitalValidator($vitalPulse, "error-vital-pulse", { min: 20, max: 260, label: "Pulse", decimals: 0 });
+  setupVitalValidator($vitalResp, "error-vital-resp", { min: 4, max: 80, label: "Respiration", decimals: 0 });
+  setupBpValidator();
 
   if ($inputPhoto) $inputPhoto.addEventListener("change", handleImageSelect);
   if ($inputUpload) $inputUpload.addEventListener("change", handleImageSelect);
@@ -203,27 +231,119 @@ function capturePhoto() {
 }
 // --------------------
 
+// --- Vital Validation ---
+const vitalErrorEls = {};
+
+function setupVitalValidator($input, errorId, cfg) {
+  const $err = document.getElementById(errorId);
+  vitalErrorEls[$input.id] = $err;
+
+  const handler = () => validateVital($input, $err, cfg);
+  $input.addEventListener("input", handler);
+  $input.addEventListener("blur", handler);
+}
+
+function setupBpValidator() {
+  const $err = document.getElementById("error-vital-bp");
+  vitalErrorEls["vital-bp-sys"] = $err;
+  vitalErrorEls["vital-bp-dia"] = $err;
+  const cfgSys = { min: 40, max: 300, label: "Systolic", decimals: 0 };
+  const cfgDia = { min: 20, max: 200, label: "Diastolic", decimals: 0 };
+  const handler = () => validateBp($err, cfgSys, cfgDia);
+  $bpSys.addEventListener("input", handler);
+  $bpDia.addEventListener("input", handler);
+  $bpSys.addEventListener("blur", handler);
+  $bpDia.addEventListener("blur", handler);
+}
+
+function showVitalError($err, msg) {
+  if (!$err) return;
+  $err.textContent = msg;
+  $err.hidden = !msg;
+}
+
+function setInvalid($input, isInvalid) {
+  $input.classList.toggle("is-invalid", isInvalid);
+}
+
+function validateVital($input, $err, cfg) {
+  const raw = $input.value.trim();
+  if (raw === "") { showVitalError($err, ""); setInvalid($input, false); return true; }
+  const num = Number(raw);
+  let valid = true;
+  if (!Number.isFinite(num)) {
+    showVitalError($err, `${cfg.label} must be a number.`); valid = false;
+  } else if (cfg.decimals === 0 && !Number.isInteger(num)) {
+    showVitalError($err, `${cfg.label} must be a whole number.`); valid = false;
+  } else if (num < cfg.min || num > cfg.max) {
+    showVitalError($err, `${cfg.label} must be between ${cfg.min} and ${cfg.max}.`); valid = false;
+  } else {
+    showVitalError($err, "");
+  }
+  setInvalid($input, !valid);
+  return valid;
+}
+
+function validateBp($err, cfgSys, cfgDia) {
+  const sysRaw = $bpSys.value.trim();
+  const diaRaw = $bpDia.value.trim();
+  if (sysRaw === "" && diaRaw === "") {
+    showVitalError($err, ""); setInvalid($bpSys, false); setInvalid($bpDia, false); return true;
+  }
+  const sys = Number(sysRaw);
+  const dia = Number(diaRaw);
+  let valid = true;
+  if ((sysRaw !== "" && !Number.isFinite(sys)) || (diaRaw !== "" && !Number.isFinite(dia))) {
+    showVitalError($err, "Blood pressure must be numbers."); valid = false;
+  } else if (sysRaw !== "" && (sys < cfgSys.min || sys > cfgSys.max)) {
+    showVitalError($err, `Systolic must be between ${cfgSys.min} and ${cfgSys.max}.`); valid = false;
+  } else if (diaRaw !== "" && (dia < cfgDia.min || dia > cfgDia.max)) {
+    showVitalError($err, `Diastolic must be between ${cfgDia.min} and ${cfgDia.max}.`); valid = false;
+  } else if (sysRaw !== "" && diaRaw !== "" && sys <= dia) {
+    showVitalError($err, "Systolic must be greater than diastolic."); valid = false;
+  } else {
+    showVitalError($err, "");
+  }
+  setInvalid($bpSys, !valid && sysRaw !== "");
+  setInvalid($bpDia, !valid && diaRaw !== "");
+  return valid;
+}
+
+function allVitalsValid() {
+  const checks = [
+    validateVital($vitalTemp, vitalErrorEls["vital-temp"], { min: 80, max: 115, label: "Temperature", decimals: 1 }),
+    validateVital($vitalPulse, vitalErrorEls["vital-pulse"], { min: 20, max: 260, label: "Pulse", decimals: 0 }),
+    validateVital($vitalResp, vitalErrorEls["vital-resp"], { min: 4, max: 80, label: "Respiration", decimals: 0 }),
+    validateBp(vitalErrorEls["vital-bp-sys"], { min: 40, max: 300, label: "Systolic", decimals: 0 }, { min: 20, max: 200, label: "Diastolic", decimals: 0 }),
+  ];
+  return checks.every(Boolean);
+}
+
 function updateTempSiteRequired() {
   const hasTempValue = $vitalTemp.value.trim() !== "";
   $siteReq.hidden = !hasTempValue;
 }
 
-function hasAnyContent() {
+// Name and Emergency notes are optional; everything else is required.
+function allRequiredFilled() {
   return !!(
-    $vitalTemp.value.trim() ||
-    $vitalPulse.value.trim() ||
-    $vitalResp.value.trim() ||
-    $bpSys.value.trim() ||
-    $bpDia.value.trim() ||
-    $notes.value.trim() ||
+    $patientId.value.trim() &&
+    $patientSex.value &&
+    $patientAge.value &&
+    $vitalTemp.value.trim() &&
+    $tempSite.value &&
+    $vitalPulse.value.trim() &&
+    $vitalResp.value.trim() &&
+    $bpSys.value.trim() &&
+    $bpDia.value.trim() &&
     selectedImageFile
   );
 }
 
 function updateSendButton() {
-  const hasPatient = $patientId.value.trim() !== "";
-  const hasContent = hasAnyContent();
-  $btnSend.disabled = !(hasPatient && hasContent);
+  const valid = allVitalsValid();
+  const filled = allRequiredFilled();
+  $btnSend.disabled = !(valid && filled);
 }
 
 function handleImageSelect(e) {
@@ -306,7 +426,8 @@ function handleSubmit(e) {
   e.preventDefault();
 
   const patientId = $patientId.value.trim();
-  if (!patientId || !hasAnyContent()) return;
+  if (!patientId || !allRequiredFilled()) return;
+  if (!allVitalsValid()) return;
 
   $btnSend.disabled = true;
   $btnSend.querySelector("span").textContent = "Sending...";
@@ -318,6 +439,9 @@ function handleSubmit(e) {
     const item = {
       id: Date.now(),
       patientId: patientId,
+      name: $patientName.value.trim() || "—",
+      sex: $patientSex.value,
+      age: $patientAge.value,
       types: types,
       status: "pending", // matches mockup
     };
@@ -337,7 +461,10 @@ function handleSubmit(e) {
 }
 
 function clearForm() {
-  $patientId.value = "";
+  $patientId.value = nextPatientId();
+  $patientName.value = "";
+  $patientSex.value = "";
+  $patientAge.value = "";
   $vitalTemp.value = "";
   $tempSite.value = "";
   $vitalPulse.value = "";
@@ -374,7 +501,7 @@ function updateSentList() {
     const text = isPending ? "pending" : "sent";
 
     li.innerHTML = `
-      <span class="sent-info">${escHtml(item.patientId)} · ${escHtml(item.types.join(" + "))}</span>
+      <span class="sent-info">${escHtml(item.patientId)} · ${escHtml(item.name)} · ${escHtml(item.sex)} · ${escHtml(item.age)} · ${escHtml(item.types.join(" + "))}</span>
       <span class="sent-status ${statusClass}">
         ${icon} ${text}
       </span>
