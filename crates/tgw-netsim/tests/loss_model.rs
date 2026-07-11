@@ -7,6 +7,7 @@ use tgw_netsim::{LossModel, NetsimConfig};
 fn cfg(seed: u64) -> NetsimConfig {
     NetsimConfig {
         loss: 0.25,
+        corrupt: 0.0,
         burst_every: Duration::from_secs(5),
         burst_len: Duration::from_millis(800),
         rate_bps: 64_000,
