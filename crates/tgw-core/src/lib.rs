@@ -27,6 +27,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod clinical;
 mod config;
 mod envelope;
 mod error;

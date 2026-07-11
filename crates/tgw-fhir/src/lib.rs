@@ -10,6 +10,11 @@
 use time::format_description::well_known::Rfc3339;
 
 use serde_json::{Value, json};
+use tgw_core::clinical::{
+    PLAUSIBLE_DIASTOLIC_MAX, PLAUSIBLE_DIASTOLIC_MIN, PLAUSIBLE_HEART_RATE_MAX,
+    PLAUSIBLE_HEART_RATE_MIN, PLAUSIBLE_SPO2_MAX, PLAUSIBLE_SPO2_MIN, PLAUSIBLE_SYSTOLIC_MAX,
+    PLAUSIBLE_SYSTOLIC_MIN,
+};
 use tgw_core::{Component, Measure, VitalsObservation};
 
 /// LOINC coding system URL (`code.coding[].system` for clinical codes).
@@ -137,33 +142,10 @@ fn display_unit(ucum: &str) -> String {
 // it is stored and surfaced with its flags so the dashboard can mark it "verify" without ever
 // hiding a possibly-real emergency reading.
 //
-// !!! EVERY numeric bound below is a PLACEHOLDER and is marked `NEEDS CLINICIAN REVIEW`. These
-// are engineering guesses at "physically possible at all," not validated clinical thresholds,
-// and MUST be signed off by a clinician before use on a real patient.
-
-/// Heart-rate plausible bounds in beats/min (LOINC 8867-4).
-// NEEDS CLINICIAN REVIEW: placeholder physiological bounds, not a clinical alarm range.
-const HEART_RATE_MIN: f64 = 20.0;
-// NEEDS CLINICIAN REVIEW
-const HEART_RATE_MAX: f64 = 300.0;
-
-/// Oxygen-saturation plausible bounds in percent (LOINC 59408-5).
-// NEEDS CLINICIAN REVIEW: below ~50% is rarely measurable/survivable; above 100% is impossible.
-const SPO2_MIN: f64 = 50.0;
-// NEEDS CLINICIAN REVIEW
-const SPO2_MAX: f64 = 100.0;
-
-/// Systolic plausible bounds in mmHg (LOINC 8480-6).
-// NEEDS CLINICIAN REVIEW
-const SYSTOLIC_MIN: f64 = 40.0;
-// NEEDS CLINICIAN REVIEW
-const SYSTOLIC_MAX: f64 = 300.0;
-
-/// Diastolic plausible bounds in mmHg (LOINC 8462-4).
-// NEEDS CLINICIAN REVIEW
-const DIASTOLIC_MIN: f64 = 20.0;
-// NEEDS CLINICIAN REVIEW
-const DIASTOLIC_MAX: f64 = 200.0;
+// !!! EVERY numeric bound used below is a PLACEHOLDER marked `NEEDS CLINICIAN REVIEW`. The
+// values are now single-sourced from `tgw_core::clinical::PLAUSIBLE_*` (Fix F5) so the field
+// hard-reject tier and this advisory tier cannot silently diverge; clinician sign-off is a
+// one-file edit there.
 
 /// Compute advisory plausibility flags for one observation.
 ///
@@ -180,14 +162,14 @@ pub fn plausibility_flags(obs: &VitalsObservation) -> Vec<String> {
             let systolic = component_value(obs, "8480-6");
             let diastolic = component_value(obs, "8462-4");
             match systolic {
-                Some(s) if !in_range(s, SYSTOLIC_MIN, SYSTOLIC_MAX) => {
+                Some(s) if !in_range(s, PLAUSIBLE_SYSTOLIC_MIN, PLAUSIBLE_SYSTOLIC_MAX) => {
                     flags.push("systolic-out-of-range".to_string());
                 }
                 None => flags.push("missing-systolic".to_string()),
                 _ => {}
             }
             match diastolic {
-                Some(d) if !in_range(d, DIASTOLIC_MIN, DIASTOLIC_MAX) => {
+                Some(d) if !in_range(d, PLAUSIBLE_DIASTOLIC_MIN, PLAUSIBLE_DIASTOLIC_MAX) => {
                     flags.push("diastolic-out-of-range".to_string());
                 }
                 None => flags.push("missing-diastolic".to_string()),
@@ -201,14 +183,32 @@ pub fn plausibility_flags(obs: &VitalsObservation) -> Vec<String> {
         }
         "8867-4" => flag_single(
             obs,
-            HEART_RATE_MIN,
-            HEART_RATE_MAX,
+            PLAUSIBLE_HEART_RATE_MIN,
+            PLAUSIBLE_HEART_RATE_MAX,
             "heart-rate",
             &mut flags,
         ),
-        "59408-5" => flag_single(obs, SPO2_MIN, SPO2_MAX, "spo2", &mut flags),
-        "8480-6" => flag_single(obs, SYSTOLIC_MIN, SYSTOLIC_MAX, "systolic", &mut flags),
-        "8462-4" => flag_single(obs, DIASTOLIC_MIN, DIASTOLIC_MAX, "diastolic", &mut flags),
+        "59408-5" => flag_single(
+            obs,
+            PLAUSIBLE_SPO2_MIN,
+            PLAUSIBLE_SPO2_MAX,
+            "spo2",
+            &mut flags,
+        ),
+        "8480-6" => flag_single(
+            obs,
+            PLAUSIBLE_SYSTOLIC_MIN,
+            PLAUSIBLE_SYSTOLIC_MAX,
+            "systolic",
+            &mut flags,
+        ),
+        "8462-4" => flag_single(
+            obs,
+            PLAUSIBLE_DIASTOLIC_MIN,
+            PLAUSIBLE_DIASTOLIC_MAX,
+            "diastolic",
+            &mut flags,
+        ),
         // No defined plausible range for this code: offer no opinion, never reject.
         _ => {}
     }

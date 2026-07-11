@@ -7,46 +7,78 @@
 //! do the same — no manual IP entry in the field, and deliberately NOT a DHT or mesh routing
 //! protocol (Fix 2 is one relay hop only).
 //!
-//! The announcement carries only a device's relay-listen address — never key material, never
-//! any bundle content.
+//! The announcement carries only a device's per-run instance id and its relay-listen address —
+//! never key material, never any bundle content.
+//!
+//! # Local convergence (Fix F3)
+//! The discovery socket is built with `SO_REUSEADDR` + `SO_REUSEPORT` so two instances on one
+//! host can co-bind the discovery port — without this, discovery could not be proven in CI/dev.
+//! Announcements are self-filtered by a per-run **instance id**, not by address: with the
+//! default `relay_listen_addr` every device advertises the same `0.0.0.0:…` string, so filtering
+//! on address would make each peer discard the others as "self." When the discovery address is a
+//! multicast group the socket joins it with multicast loopback enabled, so co-bound instances
+//! reliably receive each other's announces on a single host (loopback included); a plain
+//! broadcast address still works for a production LAN segment.
 
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
+use uuid::Uuid;
 
 /// Magic prefix identifying a TGW presence announcement (`TGW Announce`).
 const ANNOUNCE_MAGIC: &[u8; 4] = b"TGWA";
-/// Announcement format version.
-const ANNOUNCE_VERSION: u8 = 1;
+/// Announcement format version. Bumped to 2 for the instance-id field (Fix F3).
+const ANNOUNCE_VERSION: u8 = 2;
+/// Fixed header length: magic(4) + version(1) + instance id(16).
+const ANNOUNCE_HEADER: usize = 4 + 1 + 16;
 /// Cap on an announcement's advertised-address length, so a malformed datagram can't allocate.
 const MAX_ANNOUNCE: usize = 128;
 
-/// Encode a presence announcement advertising this device's `relay_addr`.
+/// A discovered peer: the sender's per-run instance id and its advertised relay-listen address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerAnnounce {
+    /// The announcing device's per-run instance id (used for self-filtering).
+    pub instance_id: Uuid,
+    /// The advertised relay-listen address to forward bundles to.
+    pub relay_addr: String,
+}
+
+/// Encode a presence announcement advertising this device's `instance_id` and `relay_addr`.
 #[must_use]
-pub fn encode_announce(relay_addr: &str) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(5 + relay_addr.len());
+pub fn encode_announce(instance_id: Uuid, relay_addr: &str) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(ANNOUNCE_HEADER + relay_addr.len());
     msg.extend_from_slice(ANNOUNCE_MAGIC);
     msg.push(ANNOUNCE_VERSION);
+    msg.extend_from_slice(instance_id.as_bytes());
     msg.extend_from_slice(relay_addr.as_bytes());
     msg
 }
 
-/// Decode a presence announcement into the advertised relay-listen address.
+/// Decode a presence announcement into its instance id and advertised relay-listen address.
 ///
 /// Returns `None` for anything that is not a well-formed, current-version announcement — a
 /// stray datagram on the discovery port is ignored, never trusted.
 #[must_use]
-pub fn decode_announce(msg: &[u8]) -> Option<String> {
-    if msg.len() < 5 || msg.len() > 5 + MAX_ANNOUNCE {
+pub fn decode_announce(msg: &[u8]) -> Option<PeerAnnounce> {
+    if msg.len() < ANNOUNCE_HEADER || msg.len() > ANNOUNCE_HEADER + MAX_ANNOUNCE {
         return None;
     }
     if &msg[0..4] != ANNOUNCE_MAGIC || msg[4] != ANNOUNCE_VERSION {
         return None;
     }
-    std::str::from_utf8(&msg[5..]).ok().map(str::to_string)
+    let instance_id = Uuid::from_slice(&msg[5..ANNOUNCE_HEADER]).ok()?;
+    let relay_addr = std::str::from_utf8(&msg[ANNOUNCE_HEADER..])
+        .ok()?
+        .to_string();
+    Some(PeerAnnounce {
+        instance_id,
+        relay_addr,
+    })
 }
 
 /// A time-expiring set of discovered peer relay addresses.
@@ -99,31 +131,63 @@ impl PeerTable {
     }
 }
 
-/// Run presence discovery: broadcast our `relay_addr` every `interval` and record peers we
-/// hear, keeping `table` current. `own_relay_addr` is filtered so we never discover ourselves.
+/// Build the discovery socket bound to `discovery_addr`'s port on `0.0.0.0`, with
+/// `SO_REUSEADDR` + `SO_REUSEPORT` so multiple instances can co-bind on one host (Fix F3). A
+/// multicast `discovery_addr` is joined with loopback delivery enabled (reliable one-host
+/// delivery); a broadcast address enables `SO_BROADCAST` for a production LAN segment.
+fn bind_discovery_socket(discovery_addr: &str) -> Result<UdpSocket> {
+    let target: SocketAddr = discovery_addr
+        .parse()
+        .with_context(|| format!("discovery: parse address {discovery_addr}"))?;
+    let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), target.port());
+
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .context("discovery: create socket")?;
+    sock.set_reuse_address(true)
+        .context("discovery: set SO_REUSEADDR")?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)
+        .context("discovery: set SO_REUSEPORT")?;
+    sock.set_nonblocking(true)
+        .context("discovery: set non-blocking")?;
+    sock.bind(&bind_addr.into())
+        .with_context(|| format!("discovery: bind {bind_addr}"))?;
+
+    if target.ip().is_multicast() {
+        if let std::net::IpAddr::V4(group) = target.ip() {
+            sock.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)
+                .with_context(|| format!("discovery: join multicast {group}"))?;
+            // Deliver our own multicast to co-bound sockets on this host (one-host convergence).
+            sock.set_multicast_loop_v4(true)
+                .context("discovery: enable multicast loopback")?;
+        }
+    } else {
+        sock.set_broadcast(true)
+            .context("discovery: enable broadcast")?;
+    }
+
+    let std_sock: std::net::UdpSocket = sock.into();
+    UdpSocket::from_std(std_sock).context("discovery: adopt socket into tokio")
+}
+
+/// Run presence discovery: announce our `own_relay_addr` every `interval` and record peers we
+/// hear, keeping `table` current. Announcements are self-filtered by `own_instance_id` (not by
+/// address), so devices sharing a `0.0.0.0:…` relay-listen string still discover one another.
 ///
-/// Bound to `discovery_addr` (a broadcast address in production). Runs until the process exits;
-/// a bind failure is surfaced so the daemon can report it. The live-broadcast loop is exercised
-/// operationally; the pure codec and [`PeerTable`] carry the unit-tested logic.
+/// Bound to `discovery_addr` (a multicast group or broadcast address). Runs until the process
+/// exits; a bind failure is surfaced so the daemon can report it.
 pub async fn run_discovery(
     discovery_addr: &str,
+    own_instance_id: Uuid,
     own_relay_addr: &str,
     interval: Duration,
     table: PeerTable,
 ) -> Result<()> {
-    let bind_port = discovery_addr
-        .rsplit_once(':')
-        .map(|(_, port)| format!("0.0.0.0:{port}"))
-        .unwrap_or_else(|| "0.0.0.0:47555".to_string());
-    let sock = UdpSocket::bind(&bind_port)
-        .await
-        .with_context(|| format!("discovery: bind {bind_port}"))?;
-    sock.set_broadcast(true)
-        .context("discovery: enable broadcast")?;
+    let sock = bind_discovery_socket(discovery_addr)?;
 
-    let announce = encode_announce(own_relay_addr);
+    let announce = encode_announce(own_instance_id, own_relay_addr);
     let mut ticker = tokio::time::interval(interval);
-    let mut buf = vec![0u8; 5 + MAX_ANNOUNCE];
+    let mut buf = vec![0u8; ANNOUNCE_HEADER + MAX_ANNOUNCE];
 
     loop {
         tokio::select! {
@@ -137,9 +201,9 @@ pub async fn run_discovery(
                 match recv {
                     Ok((n, _from)) => {
                         if let Some(peer) = decode_announce(&buf[..n])
-                            && peer != own_relay_addr
+                            && peer.instance_id != own_instance_id
                         {
-                            table.observe(peer, Instant::now());
+                            table.observe(peer.relay_addr, Instant::now());
                         }
                     }
                     Err(e) => tracing::debug!(error = %e, "discovery: recv failed"),
@@ -155,16 +219,54 @@ mod tests {
 
     #[test]
     fn announce_round_trips() {
-        let msg = encode_announce("192.168.1.7:47556");
-        assert_eq!(decode_announce(&msg).as_deref(), Some("192.168.1.7:47556"));
+        let id = Uuid::new_v4();
+        let msg = encode_announce(id, "192.168.1.7:47556");
+        assert_eq!(
+            decode_announce(&msg),
+            Some(PeerAnnounce {
+                instance_id: id,
+                relay_addr: "192.168.1.7:47556".to_string(),
+            })
+        );
     }
 
     #[test]
     fn decode_rejects_foreign_or_truncated_datagrams() {
+        let good = encode_announce(Uuid::new_v4(), "10.0.0.2:47556");
         assert!(decode_announce(b"").is_none());
-        assert!(decode_announce(b"XXXX\x01addr").is_none(), "wrong magic");
-        assert!(decode_announce(b"TGWA\x02addr").is_none(), "wrong version");
-        assert!(decode_announce(b"TGW").is_none(), "too short");
+        assert!(decode_announce(b"TGW").is_none(), "too short (no header)");
+        // Right length but wrong magic / version.
+        let mut wrong_magic = good.clone();
+        wrong_magic[0] = b'X';
+        assert!(decode_announce(&wrong_magic).is_none(), "wrong magic");
+        let mut wrong_version = good.clone();
+        wrong_version[4] = 0x01;
+        assert!(decode_announce(&wrong_version).is_none(), "wrong version");
+        // A header with no address bytes is still a valid (empty-addr) announce; a header short
+        // one byte is not.
+        assert!(
+            decode_announce(&good[..ANNOUNCE_HEADER - 1]).is_none(),
+            "truncated header"
+        );
+    }
+
+    #[test]
+    fn self_filter_is_by_instance_id_not_address() {
+        // Two devices announcing the SAME default relay address must still be distinguishable —
+        // the instance id is what separates self from peer (Fix F3).
+        let me = Uuid::new_v4();
+        let peer = Uuid::new_v4();
+        let shared_addr = "0.0.0.0:47556";
+        let mine = decode_announce(&encode_announce(me, shared_addr)).expect("mine");
+        let theirs = decode_announce(&encode_announce(peer, shared_addr)).expect("theirs");
+        assert_eq!(
+            mine.relay_addr, theirs.relay_addr,
+            "same advertised address"
+        );
+        assert_ne!(
+            mine.instance_id, theirs.instance_id,
+            "distinct instance ids keep them from filtering each other out as self"
+        );
     }
 
     #[test]

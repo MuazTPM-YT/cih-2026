@@ -157,6 +157,7 @@ async fn full_lossy_delivery_through_proxy_and_gateway() {
         nack_timeout_ms: 200,
         retry_backoff_ms: 300,
         max_retries: 40,
+        ..RetryConfig::default()
     };
 
     let gateway_addr = free_addr().await;

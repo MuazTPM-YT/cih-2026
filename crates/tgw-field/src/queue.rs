@@ -63,6 +63,12 @@ pub struct QueuedBundle {
     /// Exhausted delivery passes (each pass spends `retry.max_retries` re-bursts
     /// before the bundle is flagged stuck).
     pub retries: u32,
+    /// Fix F1 — when this bundle last entered `Stuck`, used by [`Queue::rearm_stuck`] to
+    /// back off before the daemon auto-retries it. `#[serde(default)]` keeps records written
+    /// by older builds (which lack the field) readable — they decode as `None` and re-arm
+    /// immediately, which is the safe direction.
+    #[serde(default)]
+    pub last_stuck_at: Option<OffsetDateTime>,
 }
 
 impl QueuedBundle {
@@ -82,6 +88,7 @@ impl QueuedBundle {
             envelope,
             created_at: OffsetDateTime::now_utc(),
             retries: 0,
+            last_stuck_at: None,
         })
     }
 }
@@ -182,6 +189,80 @@ impl Queue {
         let retries = record.retries;
         self.put(&record)?;
         Ok(retries)
+    }
+
+    /// Fix F1 — flag a bundle `Stuck` and stamp `last_stuck_at` so the daemon's re-arm can back
+    /// off before auto-retrying it. Use this instead of `set_state(id, Stuck)` on the delivery
+    /// path so the backoff clock is always recorded.
+    pub fn mark_stuck(&self, id: Uuid, now: OffsetDateTime) -> Result<()> {
+        let mut record = self
+            .get(id)?
+            .ok_or_else(|| anyhow!("bundle {id} not in queue"))?;
+        record.state = BundleState::Stuck;
+        record.last_stuck_at = Some(now);
+        self.put(&record)
+    }
+
+    /// Fix F1 — daemon auto-recovery: move eligible `Stuck` bundles back to `Queued` so they get
+    /// another delivery pass (and, in daemon mode, another shot at peer-relay failover). Returns
+    /// how many were re-armed.
+    ///
+    /// A bundle is eligible when it has spent fewer than `max_stuck_retries` passes (the existing
+    /// `retries` counter is the cap, so a genuinely dead link converges to permanently `Stuck`
+    /// instead of spinning) and its last stuck moment is at least `backoff` in the past. A record
+    /// with no `last_stuck_at` (written by an older build) is treated as immediately eligible.
+    pub fn rearm_stuck(
+        &self,
+        now: OffsetDateTime,
+        backoff: time::Duration,
+        max_stuck_retries: u32,
+    ) -> Result<usize> {
+        let mut rearmed = 0;
+        for mut record in self.list()? {
+            if record.state != BundleState::Stuck || record.retries >= max_stuck_retries {
+                continue;
+            }
+            let due = record.last_stuck_at.is_none_or(|t| now - t >= backoff);
+            if due {
+                record.state = BundleState::Queued;
+                self.put(&record)?;
+                rearmed += 1;
+            }
+        }
+        Ok(rearmed)
+    }
+
+    /// Fix F1 — explicit operator requeue of one `Stuck` bundle (`tgw-field requeue <id>`).
+    /// Moves it to `Queued` and resets the backoff clock (`last_stuck_at = None`) so the next
+    /// daemon pass picks it up immediately; the `retries` cap is left intact so a still-dead link
+    /// still converges. Returns `false` if the id is unknown or the bundle is not `Stuck`.
+    pub fn requeue(&self, id: Uuid) -> Result<bool> {
+        let Some(mut record) = self.get(id)? else {
+            return Ok(false);
+        };
+        if record.state != BundleState::Stuck {
+            return Ok(false);
+        }
+        record.state = BundleState::Queued;
+        record.last_stuck_at = None;
+        self.put(&record)?;
+        Ok(true)
+    }
+
+    /// Fix F1 — explicit operator requeue of every `Stuck` bundle (`tgw-field requeue --all`).
+    /// Returns how many were moved back to `Queued`. Like [`Queue::requeue`], it resets the
+    /// backoff clock and leaves `retries` intact.
+    pub fn requeue_all_stuck(&self) -> Result<usize> {
+        let mut requeued = 0;
+        for mut record in self.list()? {
+            if record.state == BundleState::Stuck {
+                record.state = BundleState::Queued;
+                record.last_stuck_at = None;
+                self.put(&record)?;
+                requeued += 1;
+            }
+        }
+        Ok(requeued)
     }
 
     fn recover_interrupted(&self) -> Result<()> {
@@ -342,6 +423,116 @@ mod tests {
                 .any(|w| w == observation_marker),
             "stored envelope leaks plaintext"
         );
+    }
+
+    #[test]
+    fn rearm_stuck_respects_backoff_and_cap() {
+        let path = temp_db("rearm");
+        let key = Key::generate();
+        let queue = must(Queue::open(&path), "open");
+        let bundle = vitals_bundle();
+        must(
+            queue.enqueue(&must(QueuedBundle::from_bundle(&bundle, &key), "record")),
+            "enqueue",
+        );
+
+        let t0 = OffsetDateTime::now_utc();
+        must(queue.mark_stuck(bundle.id, t0), "mark stuck");
+        let backoff = time::Duration::seconds(10);
+
+        // Before the backoff elapses, nothing is re-armed.
+        let early = must(
+            queue.rearm_stuck(t0 + time::Duration::seconds(5), backoff, 3),
+            "early",
+        );
+        assert_eq!(
+            early, 0,
+            "a bundle inside its backoff window is not re-armed"
+        );
+        assert_eq!(
+            must(queue.get(bundle.id), "get").map(|r| r.state),
+            Some(BundleState::Stuck)
+        );
+
+        // Past the backoff it re-arms to Queued.
+        let late = must(
+            queue.rearm_stuck(t0 + time::Duration::seconds(11), backoff, 3),
+            "late",
+        );
+        assert_eq!(late, 1, "past the backoff the stuck bundle re-arms");
+        assert_eq!(
+            must(queue.get(bundle.id), "get").map(|r| r.state),
+            Some(BundleState::Queued)
+        );
+
+        // Drive retries up to the cap; a bundle at/over the cap must never re-arm again.
+        must(queue.bump_retries(bundle.id), "bump1");
+        must(queue.bump_retries(bundle.id), "bump2");
+        must(queue.bump_retries(bundle.id), "bump3");
+        let t1 = OffsetDateTime::now_utc();
+        must(queue.mark_stuck(bundle.id, t1), "re-stuck");
+        let capped = must(
+            queue.rearm_stuck(t1 + time::Duration::seconds(60), backoff, 3),
+            "capped",
+        );
+        assert_eq!(
+            capped, 0,
+            "a bundle at the retry cap converges to permanently stuck"
+        );
+        assert_eq!(
+            must(queue.get(bundle.id), "get").map(|r| r.state),
+            Some(BundleState::Stuck)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn requeue_all_stuck_moves_only_stuck_and_resets_backoff_clock() {
+        let path = temp_db("requeue");
+        let key = Key::generate();
+        let queue = must(Queue::open(&path), "open");
+
+        let stuck = vitals_bundle();
+        let delivered = vitals_bundle();
+        let queued = image_bundle();
+        for b in [&stuck, &delivered, &queued] {
+            must(
+                queue.enqueue(&must(QueuedBundle::from_bundle(b, &key), "record")),
+                "enqueue",
+            );
+        }
+        must(
+            queue.mark_stuck(stuck.id, OffsetDateTime::now_utc()),
+            "mark stuck",
+        );
+        must(
+            queue.set_state(delivered.id, BundleState::Delivered),
+            "deliver",
+        );
+
+        let n = must(queue.requeue_all_stuck(), "requeue all");
+        assert_eq!(n, 1, "only the stuck bundle is requeued");
+        let stuck_after = must(queue.get(stuck.id), "get stuck");
+        assert_eq!(
+            stuck_after.as_ref().map(|r| r.state),
+            Some(BundleState::Queued)
+        );
+        assert!(
+            stuck_after.and_then(|r| r.last_stuck_at).is_none(),
+            "an operator requeue resets the backoff clock"
+        );
+        assert_eq!(
+            must(queue.get(delivered.id), "get delivered").map(|r| r.state),
+            Some(BundleState::Delivered),
+            "a delivered bundle is untouched"
+        );
+
+        // Single-id requeue only acts on stuck bundles.
+        assert!(
+            !must(queue.requeue(delivered.id), "requeue delivered"),
+            "requeue is a no-op for a non-stuck bundle"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

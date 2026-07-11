@@ -177,7 +177,9 @@ run_cell() {
 # Device A's direct link is 100% dead (netsim loss=1.0). B is healthy. A must relay via B.
 relay_scenario() {
   hr; log "RELAY  device A (dead direct link) must deliver via healthy peer B"
-  local A_DISC=47310 B_DISC=47311 A_RELAY=47200 B_RELAY=47201 A_NS=47060
+  # A shared site-local multicast group: both daemons co-bind it (SO_REUSEPORT) and converge on
+  # one host (Fix F3). A_RELAY/B_RELAY are each device's relay-listen address.
+  local DISC_GROUP="239.255.7.66:47312" A_RELAY=47200 B_RELAY=47201 A_NS=47060
   start_gateway || { log "  relay: gateway down"; return; }
 
   # A dead direct link: netsim at A_NS dropping 100% toward the gateway.
@@ -185,7 +187,7 @@ relay_scenario() {
     --listen "127.0.0.1:$A_NS" --forward "127.0.0.1:$GW_UDP" > "$WORK/logs/relay_netsim.log" 2>&1 &
   local ANS_PID=$!; sleep 0.3
 
-  # Device B — healthy direct link + relay service; discovers A by unicast cross-announce.
+  # Device B — healthy direct link + relay service; discovers A on the shared multicast group.
   cat > "$WORK/fieldB.toml" <<EOF
 [link]
 bandwidth_bps = 56000
@@ -205,12 +207,12 @@ key_file = "$WORK/keys/psk.key"
 image_max_bytes = 30000
 [relay]
 enabled = true
-discovery_addr = "127.0.0.1:$A_DISC"
+discovery_addr = "$DISC_GROUP"
 relay_listen_addr = "127.0.0.1:$B_RELAY"
 announce_interval_ms = 500
 peer_ttl_ms = 8000
 EOF
-  # Device A — dead direct link (via A_NS), relay enabled, discovers B.
+  # Device A — dead direct link (via A_NS), relay enabled, discovers B on the shared group.
   cat > "$WORK/fieldA.toml" <<EOF
 [link]
 bandwidth_bps = 56000
@@ -220,6 +222,9 @@ overhead_factor = 1.4
 nack_timeout_ms = 800
 retry_backoff_ms = 500
 max_retries = 3
+# F1: re-arm A's STUCK bundle quickly so the daemon retries it through the relay this run.
+stuck_retry_backoff_ms = 500
+max_stuck_retries = 20
 [net]
 gateway_addr = "127.0.0.1:$A_NS"
 listen_addr = "127.0.0.1:0"
@@ -230,7 +235,7 @@ key_file = "$WORK/keys/psk.key"
 image_max_bytes = 30000
 [relay]
 enabled = true
-discovery_addr = "127.0.0.1:$B_DISC"
+discovery_addr = "$DISC_GROUP"
 relay_listen_addr = "127.0.0.1:$A_RELAY"
 announce_interval_ms = 500
 peer_ttl_ms = 8000
@@ -244,23 +249,18 @@ EOF
   local B_PID=$!
   sleep 1
 
-  # A begins a send over its DEAD direct link, then is interrupted mid-flight (process
-  # killed / battery dies). This leaves the bundle in `Sending`. NOTE: a cleanly-Stuck bundle
-  # is terminal — the daemon's next_sendable() returns only `Queued` and there is no requeue
-  # command — so the interrupted-then-recovered path is the ONLY route by which the daemon's
-  # relay failover is reachable via the CLI (this is a reported finding).
+  # A does a normal one-shot send over its DEAD direct link. One-shot is direct-only, so the
+  # bundle cleanly reaches STUCK and is KEPT in A's queue (exit non-zero is expected). No
+  # interrupt/kill trick — the daemon's F1 re-arm now reaches STUCK bundles through the queue.
   local RPID="P-RELAY-42"
   TGW_QUEUE_PATH="$QA" RUST_LOG=error \
     "$BIN/tgw-field" --config "$WORK/fieldA.toml" send-vitals --pulse 84 --patient "$RPID" \
-    > "$WORK/logs/relay_A_send.log" 2>&1 &
-  local SEND_PID=$!
-  sleep 1.2
-  kill -9 "$SEND_PID" >/dev/null 2>&1; wait "$SEND_PID" >/dev/null 2>&1
+    > "$WORK/logs/relay_A_send.log" 2>&1
   local a_send_rc=$?
   local a_state; a_state=$(TGW_QUEUE_PATH="$QA" "$BIN/tgw-field" --config "$WORK/fieldA.toml" status 2>/dev/null | grep RELAY | awk '{print $3}')
 
-  # Start A's daemon — open() revives the interrupted send (Sending→Queued); the daemon then
-  # discovers B and relays the bundle through it on its first drain pass.
+  # Start A's daemon: it discovers B on the shared multicast group (F3), re-arms the STUCK
+  # bundle after the backoff (F1), and relays it through B on the next drain pass.
   TGW_QUEUE_PATH="$QA" RUST_LOG=info "$BIN/tgw-field" --config "$WORK/fieldA.toml" daemon \
     > "$WORK/logs/relay_A_daemon.log" 2>&1 &
   local A_PID=$!
@@ -274,21 +274,20 @@ EOF
     sleep 0.5
   done
 
-  # Did the daemon recover the interrupted send (Sending→Queued) and re-attempt it?
-  local recovered=0 relay_attempted=0
-  grep -q 'sending' "$WORK/logs/relay_A_daemon.log" 2>/dev/null && recovered=1
-  grep -qi 'relay' "$WORK/logs/relay_A_daemon.log" 2>/dev/null && relay_attempted=1
-  # Did A ever discover B? (Broadcast/shared-port discovery cannot converge on one host.)
+  # Did the daemon re-arm the STUCK bundle (F1) for another pass?
+  local rearmed=0
+  grep -qi 're-armed' "$WORK/logs/relay_A_daemon.log" 2>/dev/null && rearmed=1
+  # Did A discover peer B on one host (F3: SO_REUSEPORT + instance-id filter + multicast loop)?
   local discovered=0
   grep -qi 'peer relay' "$WORK/logs/relay_A_daemon.log" 2>/dev/null && discovered=1
 
   kill_quiet "$A_PID" "$B_PID" "$ANS_PID" "$GW_PID"
 
-  log "  interrupted send recovered by daemon (Sending→Queued) = $recovered"
-  log "  A discovered peer B on one host = $discovered  (0 expected: no SO_REUSEPORT + broadcast model)"
-  log "  relay_delivered_live = $relay_ok  (relay DATA PATH is proven by tests/relay_delivery.rs)"
-  log "  a_send rc after kill = $a_send_rc; post-kill queue state = ${a_state:-n/a}"
-  echo "RELAY,,failover,1,$recovered,$relay_ok,NA,$discovered,NA" >> "$RESULTS"
+  log "  daemon re-armed STUCK bundle (F1) = $rearmed"
+  log "  A discovered peer B on one host (F3) = $discovered  (1 expected now)"
+  log "  relay_delivered_live = $relay_ok  (via the normal daemon queue path, no interrupt trick)"
+  log "  one-shot send rc = $a_send_rc (non-zero expected: direct link dead); queue state = ${a_state:-n/a}"
+  echo "RELAY,,failover,1,$rearmed,$relay_ok,NA,$discovered,NA" >> "$RESULTS"
 }
 
 main() {
