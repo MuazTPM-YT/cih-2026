@@ -19,7 +19,10 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use tgw_core::{Absorb, Bundle, BundlePayload, BundleReceiver, Frame, parse_frame};
+use tgw_core::{
+    Absorb, Bundle, BundlePayload, BundleReceiver, Frame, Key, build_receipt, encode_nack,
+    parse_frame,
+};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::net::UdpSocket;
@@ -108,7 +111,7 @@ pub async fn run_http_server_store(addr: SocketAddr, state: StoreState) -> anyho
 /// store/dedup path is real and unit-tested; the receipt send is `BLOCKED(PHASE-E)` until Muaz's
 /// `build_receipt` + `Key::from_file` exist. This path is correct-by-construction and
 /// compiles + clippy-clean today.
-pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>) -> anyhow::Result<()> {
+pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> anyhow::Result<()> {
     let sock = UdpSocket::bind(addr)
         .await
         .context("gateway: bind UDP listener")?;
@@ -136,7 +139,10 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>) -> anyhow::Re
             Frame::Data { bundle_id } => {
                 // Drive the per-bundle receiver. The borrow of `receivers` ends once `absorb`
                 // returns, so we can mutate `receivers` again in the outcome arms below.
-                let outcome = receivers.entry(bundle_id).or_default().absorb(dgram);
+                let outcome = receivers
+                    .entry(bundle_id)
+                    .or_insert_with(|| BundleReceiver::new(key.clone()))
+                    .absorb(dgram);
                 match outcome {
                     Ok(Absorb::NeedMore) => {
                         tracing::debug!(%bundle_id, "gateway: need more symbols");
@@ -144,9 +150,8 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>) -> anyhow::Re
                     Ok(Absorb::Complete(bundle)) => {
                         receivers.remove(&bundle_id);
                         handle_complete(&store, &bundle);
-                        // BLOCKED(PHASE-E): send a DELIVERED receipt via
-                        // `tgw_core::build_receipt(bundle.id, &key)` over UDP to `src`.
-                        // Needs Muaz's real core (`Key::from_file` + `build_receipt`).
+                        let receipt = build_receipt(bundle.id, &key);
+                        sock.send_to(&receipt, src).await.context("gateway: send receipt")?;
                     }
                     Ok(Absorb::Nack(nack)) => {
                         tracing::info!(
@@ -154,7 +159,7 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>) -> anyhow::Re
                             needed_blocks = nack.needed.len(),
                             "gateway: decode stalled, NACK queued"
                         );
-                        // TODO(PHASE-E): send the NACK back to the field source via UDP.
+                        sock.send_to(&encode_nack(&nack), src).await.context("gateway: send NACK")?;
                     }
                     Err(e) => {
                         tracing::warn!(%bundle_id, error = %e, "gateway: absorb failed, dropping bundle");
@@ -218,7 +223,7 @@ fn persist_bundle(store: &Store, bundle: &Bundle) -> anyhow::Result<()> {
                 store.store_observation(bundle.id, &json)?;
             }
         }
-        BundlePayload::Image { mime, data } => {
+        BundlePayload::Image { mime, data, .. } => {
             store.store_image(bundle.id, mime, data)?;
         }
     }
@@ -241,7 +246,7 @@ fn on_complete(bundle: &Bundle) {
                 println!("{pretty}");
             }
         }
-        BundlePayload::Image { mime, data } => {
+        BundlePayload::Image { mime, data, .. } => {
             tracing::info!(
                 bundle_id = %bundle.id,
                 %mime,

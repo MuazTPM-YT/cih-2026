@@ -3,7 +3,6 @@
 //! Scaffold: starts the HTTP server (serving the dashboard + mock fixtures). Wire up config
 //! parsing (Phase F) and the UDP listener (Phase B) at the marked TODOs.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,16 +21,6 @@ struct Cli {
     /// Directory of static dashboard files (Jiya's `static/`).
     #[arg(long, default_value = "crates/tgw-gateway/static")]
     static_dir: PathBuf,
-    /// HTTP bind address for the dashboard/API.
-    #[arg(long, default_value = "0.0.0.0:8080")]
-    http_addr: SocketAddr,
-    /// UDP bind address for incoming `DATA` frames (Phase-B shortcut; Phase F loads it from
-    /// the TOML config's `[net] listen_addr`).
-    #[arg(long, default_value = "0.0.0.0:47000")]
-    listen: SocketAddr,
-    /// Path to the redb database file (Phase-E shortcut; Phase F loads it from config).
-    #[arg(long, default_value = "gateway.redb")]
-    db: PathBuf,
 }
 
 #[tokio::main]
@@ -39,11 +28,21 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    // TODO(PHASE-F): load `cli.config` into a typed GatewayConfig (TOML + env overrides) and
-    // derive `listen`/`http_addr`/`key_file`/db path from it instead of the CLI shortcuts.
-    let _ = &cli.config;
+    let config = tgw_core::Config::load(&cli.config).context("load gateway config")?;
+    let listen = config
+        .net
+        .listen_addr
+        .parse()
+        .context("parse gateway UDP listen address")?;
+    let http_addr = config
+        .net
+        .http_addr
+        .parse()
+        .context("parse gateway HTTP address")?;
+    let db = database_path(&cli.config)?;
+    let key = tgw_core::Key::from_file(&config.crypto.key_file).context("load gateway key")?;
 
-    let store = Arc::new(tgw_gateway::Store::open(&cli.db).context("open gateway store")?);
+    let store = Arc::new(tgw_gateway::Store::open(&db).context("open gateway store")?);
 
     let state = tgw_gateway::StoreState {
         base: tgw_gateway::AppState {
@@ -54,8 +53,23 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the UDP decode path and the HTTP API concurrently; neither blocks the other. If
     // either errors (e.g. UDP bind fails), `try_join!` cancels the other and propagates.
-    let udp = tgw_gateway::run_udp_listener(cli.listen, Arc::clone(&store));
-    let http = tgw_gateway::run_http_server_store(cli.http_addr, state);
+    let udp = tgw_gateway::run_udp_listener(listen, Arc::clone(&store), key);
+    let http = tgw_gateway::run_http_server_store(http_addr, state);
     let ((), ()) = tokio::try_join!(udp, http)?;
     Ok(())
+}
+
+/// Load the gateway-only storage extension and apply its environment override.
+fn database_path(config_path: &std::path::Path) -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("TGW_DB_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+    let text = std::fs::read_to_string(config_path).context("read gateway storage config")?;
+    let value: toml::Value = toml::from_str(&text).context("parse gateway storage config")?;
+    let path = value
+        .get("storage")
+        .and_then(|storage| storage.get("db_path"))
+        .and_then(toml::Value::as_str)
+        .context("config [storage].db_path is required")?;
+    Ok(PathBuf::from(path))
 }
