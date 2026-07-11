@@ -940,18 +940,76 @@ function handleSubmit(e) {
     })
     .catch(err => console.error("failed to prepare case images", err));
 
-  setTimeout(() => {
-    patient.status = "transmitting";
-    updateSentList();
-    const recovered = Math.random() < 0.15;
-    setTimeout(() => {
-      patient.status = recovered ? "recovered" : "delivered";
+  // Bridge to the REAL send path: POST the vitals to the local field agent
+  // (`tgw-field serve`), which seals + RaptorQ-encodes + sends over UDP to the gateway and
+  // returns the true delivery outcome. If no bridge is reachable (e.g. the UI is served from a
+  // plain static server), fall back to the local transmit simulation so the standalone demo
+  // still works.
+  patient.status = "transmitting";
+  updateSentList();
+
+  const restoreButton = () => {
+    $btnSend.querySelector("span").textContent = "Submit Patient Data";
+    $btnSend.classList.remove("sending");
+  };
+
+  sendToBackend(patient)
+    .then(result => {
+      if (result.rejected) {
+        patient.status = "error";
+        patient.statusDetail = result.message;
+      } else {
+        patient.status = result.delivered ? "delivered" : "stuck";
+        if (result.short_id) patient.bundleId = result.short_id;
+      }
       updateSentList();
-      $btnSend.querySelector("span").textContent = "Submit Patient Data";
-      $btnSend.classList.remove("sending");
-      clearForm();
-    }, 2000);
-  }, 800);
+      restoreButton();
+      if (!result.rejected) clearForm();
+    })
+    .catch(() => {
+      // Bridge unreachable — keep the old local simulation so the standalone UI still demos.
+      const recovered = Math.random() < 0.15;
+      setTimeout(() => {
+        patient.status = recovered ? "recovered" : "delivered";
+        updateSentList();
+        restoreButton();
+        clearForm();
+      }, 1600);
+    });
+}
+
+// Bridge a capture to the local field agent's real UDP send path (`tgw-field serve`).
+// Resolves with the agent's JSON result ({ short_id, state, delivered }) on a reachable bridge —
+// including a { rejected, message } shape for a 4xx (e.g. vitals outside the input bounds).
+// Rejects ONLY when the bridge is unreachable, so the caller can fall back to the simulation.
+async function sendToBackend(patient) {
+  const v = patient.vitals || {};
+  const body = {
+    patient: patient.patientId,
+    device: "field-ui",
+    performer: "field-worker",
+    bp_sys: v.bpSys != null ? v.bpSys : null,
+    bp_dia: v.bpDia != null ? v.bpDia : null,
+    spo2:   v.spo2  != null ? v.spo2  : null,
+    pulse:  v.pulse != null ? v.pulse : null,
+  };
+  let res;
+  try {
+    res = await fetch("/api/capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    const err = new Error("field bridge unreachable");
+    err.bridgeUnreachable = true;
+    throw err;
+  }
+  if (!res.ok) {
+    const message = await res.text().catch(() => res.statusText);
+    return { rejected: true, delivered: false, message };
+  }
+  return res.json();
 }
 
 function clearForm() {
@@ -1043,7 +1101,7 @@ function updateSentList() {
 }
 
 function statusChipHtml(status) {
-  const labels = { preparing: "Preparing", transmitting: "Transmitting", delivered: "Delivered", recovered: "Recovered via FEC", failed: "Failed" };
+  const labels = { preparing: "Preparing", transmitting: "Transmitting", delivered: "Delivered", recovered: "Recovered via FEC", failed: "Failed", stuck: "Kept (STUCK)", error: "Rejected" };
   return '<span class="status-chip status-' + status + '"><span class="status-dot"></span>' + (labels[status] || status) + '</span>';
 }
 

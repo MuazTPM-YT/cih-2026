@@ -6,12 +6,19 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use tgw_core::{Bundle, BundleSender, Config, FecConfig, Key, RetryConfig};
 use tokio::net::UdpSocket;
+use tower_http::services::ServeDir;
 
 use tgw_field::breaker::{BreakerEvent, LinkBreaker, probe_budget};
 use tgw_field::discovery::{PeerTable, run_discovery};
@@ -101,6 +108,17 @@ enum Command {
     },
     /// Run continuously: drain the queue, resume interrupted transfers, serve NACKs.
     Daemon,
+    /// Serve the browser field-capture UI and bridge its captures onto the REAL send path.
+    /// A `POST /api/capture` seals + RaptorQ-encodes + sends over UDP to the gateway exactly
+    /// like `send-vitals`, so the frontend drives the true store-and-forward path (not a mock).
+    Serve {
+        /// HTTP bind for the UI + bridge API.
+        #[arg(long, default_value = "127.0.0.1:8091")]
+        http: String,
+        /// Directory of the field-capture UI to serve.
+        #[arg(long, default_value = "field-ui")]
+        ui_dir: PathBuf,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -146,6 +164,7 @@ async fn main() -> Result<()> {
         Command::Status { watch } => status(&cli.config, watch).await,
         Command::Requeue { id, all } => requeue_cmd(id, all),
         Command::Daemon => daemon(&cli.config).await,
+        Command::Serve { http, ui_dir } => serve(&cli.config, &http, ui_dir).await,
     }
 }
 
@@ -595,6 +614,159 @@ fn start_relay_services(config: &Config) -> Option<PeerTable> {
     }
 
     Some(table)
+}
+
+/// Shared state for the field bridge server (Fix: connect the browser UI to the real path).
+struct BridgeState {
+    config: Config,
+    key: Key,
+    queue: Queue,
+    /// Serializes captures so concurrent POSTs don't interleave drains of the shared queue.
+    send_lock: tokio::sync::Mutex<()>,
+}
+
+/// One capture POSTed by the browser field UI. All vitals are optional; at least one must be
+/// present (mirrors `send-vitals`). BP is sent as separate systolic/diastolic components.
+#[derive(Debug, Deserialize)]
+struct CapturePayload {
+    patient: String,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    performer: Option<String>,
+    #[serde(default)]
+    bp_sys: Option<f64>,
+    #[serde(default)]
+    bp_dia: Option<f64>,
+    #[serde(default)]
+    spo2: Option<f64>,
+    #[serde(default)]
+    pulse: Option<f64>,
+}
+
+/// The result of a bridged capture: the real delivery outcome, surfaced back to the UI.
+#[derive(Debug, Serialize)]
+struct CaptureResult {
+    bundle_id: String,
+    short_id: String,
+    state: String,
+    delivered: bool,
+}
+
+/// Serve the browser field UI and bridge its captures onto the real UDP send path.
+async fn serve(config_path: &Path, http: &str, ui_dir: PathBuf) -> Result<()> {
+    let (config, key) = load_config_and_key(config_path)?;
+    let queue = Queue::open(&queue_path())?;
+    let state = Arc::new(BridgeState {
+        config,
+        key,
+        queue,
+        send_lock: tokio::sync::Mutex::new(()),
+    });
+
+    let app = Router::new()
+        .route("/api/capture", post(capture_handler))
+        .route("/api/status", get(status_handler))
+        // Anything else is served from the field UI directory (index.html, app.js, …).
+        .fallback_service(ServeDir::new(&ui_dir))
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind(http)
+        .await
+        .with_context(|| format!("binding field bridge {http}"))?;
+    tracing::info!(
+        http = %http,
+        gateway = %state.config.net.gateway_addr,
+        ui = %ui_dir.display(),
+        "field bridge up — POST /api/capture runs the REAL seal→RaptorQ→UDP send"
+    );
+    axum::serve(listener, app)
+        .await
+        .context("field bridge server")?;
+    Ok(())
+}
+
+/// Bridge a browser capture onto the real send path: build observations under the same capture
+/// guards as the CLI, enqueue, and drain over UDP to the gateway (direct link, like `send-vitals`).
+async fn capture_handler(
+    State(state): State<Arc<BridgeState>>,
+    Json(payload): Json<CapturePayload>,
+) -> Result<Json<CaptureResult>, (StatusCode, String)> {
+    let bp = match (payload.bp_sys, payload.bp_dia) {
+        (Some(sys), Some(dia)) => Some(format!("{sys}/{dia}")),
+        (None, None) => None,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "blood pressure needs both systolic and diastolic".to_string(),
+            ));
+        }
+    };
+    let input = VitalsInput {
+        bp,
+        spo2: payload.spo2,
+        pulse: payload.pulse,
+        patient: payload.patient,
+        device: payload.device.unwrap_or_else(|| "field-ui".to_string()),
+        performer: payload
+            .performer
+            .unwrap_or_else(|| "field-worker".to_string()),
+    };
+    // Same capture guards as the CLI: INPUT_* bounds, diastolic < systolic, ≥1 measurement.
+    let observations =
+        build_observations(&input).map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    let bundle = Bundle::new_vitals(observations);
+
+    let record = QueuedBundle::from_bundle(&bundle, &state.key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    state
+        .queue
+        .enqueue(&record)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+
+    // Serialize the drain so concurrent captures don't interleave on the shared queue/socket.
+    {
+        let _guard = state.send_lock.lock().await;
+        drain_queue(&state.config, &state.key, &state.queue, None)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    }
+
+    let final_state = state
+        .queue
+        .get(bundle.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?
+        .map(|r| r.state);
+    Ok(Json(CaptureResult {
+        bundle_id: bundle.id.to_string(),
+        short_id: short_id(bundle.id),
+        state: final_state
+            .map_or("missing", BundleState::label)
+            .to_string(),
+        delivered: final_state == Some(BundleState::Delivered),
+    }))
+}
+
+/// Return the field queue as JSON so the UI can show queued/sending/delivered/stuck states.
+async fn status_handler(
+    State(state): State<Arc<BridgeState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let records = state
+        .queue
+        .list()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    let items: Vec<serde_json::Value> = records
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "short_id": short_id(r.id),
+                "kind": r.kind,
+                "state": r.state.label(),
+                "retries": r.retries,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "queue": items })))
 }
 
 async fn status(config_path: &Path, watch: bool) -> Result<()> {

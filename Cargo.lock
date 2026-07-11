@@ -1073,15 +1073,18 @@ name = "tgw-field"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "ciborium",
  "clap",
  "rand",
  "redb",
  "serde",
+ "serde_json",
  "socket2 0.5.10",
  "tgw-core",
  "time",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
