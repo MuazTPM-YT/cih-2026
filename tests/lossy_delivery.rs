@@ -12,16 +12,22 @@
 //! The fuller gateway+receipt end-to-end (store, DELIVERED receipts, priority) is layered on
 //! in Phase D/E once those gateway APIs exist — see tasks/twaha-agent-prompt.md.
 
+use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tgw_core::{
-    Absorb, Bundle, BundlePayload, BundleReceiver, FecConfig, Key, Measure, Priority,
-    VitalsObservation, encode_bundle,
+    Absorb, Bundle, BundlePayload, BundleReceiver, BundleSender, FecConfig, Key, Measure, Priority,
+    RetryConfig, VitalsObservation, encode_bundle,
 };
-use tgw_netsim::{LossModel, NetsimConfig};
+use tgw_field::pacer::Pacer;
+use tgw_field::sender::{Outcome, deliver};
+use tgw_gateway::{Store, run_udp_listener};
+use tgw_netsim::{LossModel, NetsimConfig, run_proxy};
 use time::macros::datetime;
+use tokio::net::UdpSocket;
 use uuid::Uuid;
 
 /// Stable digest of a payload's canonical serialization, for intact-delivery checks.
@@ -109,4 +115,120 @@ fn vitals_and_image_survive_25pct_loss() {
         assert_survives_loss(&vitals_bundle(n), &key, 0.25);
     }
     assert_survives_loss(&image_bundle(), &key, 0.25);
+}
+
+/// Grab an ephemeral loopback UDP port, then release it so a server can rebind it.
+/// (Standard test trick: the race window on loopback is negligible.)
+async fn free_addr() -> SocketAddr {
+    let sock = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral");
+    sock.local_addr().expect("local addr")
+    // `sock` drops here, freeing the port for the real server to bind.
+}
+
+/// A ~10 KB image — big enough for multi-symbol FEC through the real proxy, small enough
+/// that a 64 kbps paced burst stays inside the OS socket buffer and the test stays fast.
+fn small_image_bundle() -> Bundle {
+    Bundle {
+        id: Uuid::new_v4(),
+        priority: Priority::Image,
+        payload: BundlePayload::Image {
+            mime: "image/jpeg".into(),
+            data: vec![0xAB; 10_000],
+            patient_id: "P-1023".into(),
+        },
+    }
+}
+
+/// THE full end-to-end resilience evidence (docs/ARCHITECTURE.md §8): field client →
+/// `tgw-netsim` lossy proxy (25% loss + burst + 64 kbps + jitter, seeded) → real gateway
+/// (`run_udp_listener` with decode-stall NACKs) → AEAD `DELIVERED` receipts back through the
+/// proxy's reverse path. Uses the **default `overhead_factor` 1.4** so the NACK/repair loop is
+/// genuinely exercised (unlike the library-level test's 2.0). Asserts every bundle is
+/// `Delivered` and lands in the gateway's redb store, all inside a bounded timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_lossy_delivery_through_proxy_and_gateway() {
+    let key = Key::from_bytes([9u8; 32]);
+    let fec = FecConfig {
+        symbol_size: 1100,
+        overhead_factor: 1.4,
+    };
+    // Short timers keep the test brisk; ratios mirror the real config.
+    let retry = RetryConfig {
+        nack_timeout_ms: 200,
+        retry_backoff_ms: 300,
+        max_retries: 40,
+    };
+
+    let gateway_addr = free_addr().await;
+    let proxy_listen = free_addr().await;
+
+    // Real gateway with a temp redb store.
+    let store_path = std::env::temp_dir().join(format!("tgw-e2e-{}.redb", std::process::id()));
+    let _ = std::fs::remove_file(&store_path);
+    let store = Arc::new(Store::open(&store_path).expect("open store"));
+    let gw_key = key.clone();
+    let gw_store = Arc::clone(&store);
+    tokio::spawn(async move {
+        let _ = run_udp_listener(
+            gateway_addr,
+            gw_store,
+            gw_key,
+            Duration::from_millis(retry.nack_timeout_ms),
+        )
+        .await;
+    });
+
+    // Lossy link: 25% loss + burst + 64 kbps + jitter, forwarding to the gateway.
+    let netsim = NetsimConfig {
+        loss: 0.25,
+        rate_bps: 64_000,
+        seed: 0x2026_0711,
+        ..NetsimConfig::default()
+    };
+    tokio::spawn(async move {
+        let _ = run_proxy(netsim, proxy_listen, gateway_addr).await;
+    });
+
+    // Give the servers a moment to bind.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Field side: one connected socket, deliver 5 vitals + one image through the proxy.
+    let field_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind field");
+    field_sock
+        .connect(proxy_listen)
+        .await
+        .expect("connect proxy");
+    let mut pacer = Pacer::new(10_000_000, 64 * 1024); // netsim enforces the 64 kbps link
+
+    let mut bundles: Vec<Bundle> = (0..5).map(vitals_bundle).collect();
+    bundles.push(small_image_bundle());
+
+    let run = async {
+        for bundle in &bundles {
+            let mut sender = BundleSender::new(bundle, &key, &fec).expect("sender");
+            let outcome = deliver(&field_sock, &mut sender, &mut pacer, &key, &retry, || false)
+                .await
+                .expect("deliver");
+            assert_eq!(
+                outcome,
+                Outcome::Delivered,
+                "bundle {} must be delivered through the lossy link",
+                bundle.id
+            );
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(90), run)
+        .await
+        .expect("delivery must complete within the time bound");
+
+    // Every bundle must be durably in the gateway's store (receipts were authentic).
+    for bundle in &bundles {
+        assert!(
+            store.is_delivered(bundle.id).expect("is_delivered"),
+            "bundle {} must be persisted at the gateway",
+            bundle.id
+        );
+    }
 }
