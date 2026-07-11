@@ -139,19 +139,34 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
             Frame::Data { bundle_id } => {
                 // Drive the per-bundle receiver. The borrow of `receivers` ends once `absorb`
                 // returns, so we can mutate `receivers` again in the outcome arms below.
-                let outcome = receivers
-                    .entry(bundle_id)
-                    .or_insert_with(|| BundleReceiver::new(key.clone()))
-                    .absorb(dgram);
+                let (outcome, symbols_received, symbols_needed) = {
+                    let receiver = receivers
+                        .entry(bundle_id)
+                        .or_insert_with(|| BundleReceiver::new(key.clone()));
+                    let outcome = receiver.absorb(dgram);
+                    (
+                        outcome,
+                        receiver.symbols_received(),
+                        receiver.symbols_needed().unwrap_or_default(),
+                    )
+                };
                 match outcome {
                     Ok(Absorb::NeedMore) => {
+                        store.record_receiving(
+                            bundle_id,
+                            symbols_received,
+                            symbols_needed,
+                            &timestamp()?,
+                        )?;
                         tracing::debug!(%bundle_id, "gateway: need more symbols");
                     }
                     Ok(Absorb::Complete(bundle)) => {
                         receivers.remove(&bundle_id);
-                        handle_complete(&store, &bundle);
-                        let receipt = build_receipt(bundle.id, &key);
-                        sock.send_to(&receipt, src).await.context("gateway: send receipt")?;
+                        if handle_complete(&store, &bundle)? {
+                            let receipt = build_receipt(bundle.id, &key);
+                            sock.send_to(&receipt, src).await.context("gateway: send receipt")?;
+                            store.mark_receipt_sent(bundle.id)?;
+                        }
                     }
                     Ok(Absorb::Nack(nack)) => {
                         tracing::info!(
@@ -187,48 +202,44 @@ pub async fn run_udp_listener(addr: SocketAddr, store: Arc<Store>, key: Key) -> 
 /// A re-burst of an already-delivered bundle is logged but not re-stored (idempotent); a fresh
 /// bundle is persisted — FHIR R5 JSON for vitals, raw bytes + MIME for images — and marked
 /// delivered in the [`Store`].
-fn handle_complete(store: &Store, bundle: &Bundle) {
+fn handle_complete(store: &Store, bundle: &Bundle) -> anyhow::Result<bool> {
     let id = bundle.id;
     let already_delivered = match store.is_delivered(id) {
         Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, %id, "gateway: dedup check failed; storing fresh");
-            false
-        }
+        Err(e) => return Err(e),
     };
     if already_delivered {
         tracing::info!(%id, "gateway: duplicate re-burst of an already-delivered bundle");
         // The bundle is owed a fresh receipt (idempotent), but no second record is written.
-        return;
+        return Ok(true);
     }
 
     on_complete(bundle);
-    if let Err(e) = persist_bundle(store, bundle) {
-        tracing::warn!(error = %e, %id, "gateway: persisting bundle failed");
-    }
+    persist_bundle(store, bundle)?;
+    Ok(true)
 }
 
 /// Persist a fresh bundle into the [`Store`]: FHIR JSON for vitals, bytes+MIME for images,
 /// then mark the bundle ID as delivered with an RFC-3339 `received_at` timestamp.
 fn persist_bundle(store: &Store, bundle: &Bundle) -> anyhow::Result<()> {
-    let received_at = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_default();
+    let received_at = timestamp()?;
     match &bundle.payload {
         BundlePayload::Vitals(observations) => {
-            // Contract 3 has one `fhir` per bundle; use the first (panel) observation.
-            if let Some(obs) = observations.first() {
-                let fhir = tgw_fhir::to_fhir_json(obs);
-                let json = serde_json::to_string(&fhir).unwrap_or_default();
-                store.store_observation(bundle.id, &json)?;
-            }
+            let fhir: Vec<_> = observations.iter().map(tgw_fhir::to_fhir_json).collect();
+            store.complete_vitals(bundle.id, &fhir, &received_at)?;
         }
-        BundlePayload::Image { mime, data, .. } => {
-            store.store_image(bundle.id, mime, data)?;
+        BundlePayload::Image { mime, data, patient_id } => {
+            store.complete_image(bundle.id, mime, data, patient_id, &received_at)?;
         }
     }
-    store.mark_delivered(bundle.id, &received_at)?;
     Ok(())
+}
+
+/// Format a UTC timestamp for durable Contract-3 fields.
+fn timestamp() -> anyhow::Result<String> {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("format RFC-3339 timestamp")
 }
 
 /// Log a decoded bundle's identity (no PHI) and pretty-print its FHIR JSON for vitals.
@@ -349,35 +360,35 @@ async fn get_image_store(
 fn build_observations_json(store: &Store) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
     let rows = store.list_delivered()?;
-    let items: Vec<serde_json::Value> = rows
-        .into_iter()
-        .filter_map(|(id, received_at, kind)| match kind {
-            "vitals" => {
-                let fhir_json: serde_json::Value = store.get_observation(id).ok()??.parse().ok()?;
-                Some(json!({
+    let mut items = Vec::new();
+    for (id, received_at, kind) in rows {
+        match kind {
+            "vitals" => for fhir_json in store.get_observations(id)?.unwrap_or_default() {
+                let patient_id = fhir_json
+                    .get("subject")
+                    .and_then(|subject| subject.get("reference"))
+                    .and_then(|reference| reference.as_str())
+                    .and_then(|reference| reference.strip_prefix("Patient/"))
+                    .unwrap_or_default();
+                items.push(json!({
                     "bundle_id": id.to_string(),
                     "received_at": received_at,
-                    "patient_id": fhir_json
-                        .get("subject")
-                        .and_then(|s| s.get("reference"))
-                        .and_then(|r| r.as_str())
-                        .and_then(|r| r.strip_prefix("Patient/"))
-                        .unwrap_or(""),
+                    "patient_id": patient_id,
                     "kind": "vitals",
                     "summary": format_summary(&fhir_json),
                     "fhir": fhir_json,
-                }))
-            }
-            "image" => Some(json!({
+                }));
+            },
+            "image" => items.push(json!({
                 "bundle_id": id.to_string(),
                 "received_at": received_at,
-                "patient_id": "",
+                "patient_id": store.get_image_patient(id)?.unwrap_or_default(),
                 "kind": "image",
                 "image_url": format!("/api/images/{}", id),
             })),
-            _ => None,
-        })
-        .collect();
+            _ => {}
+        }
+    }
     Ok(serde_json::Value::Array(items))
 }
 
@@ -412,17 +423,17 @@ fn format_summary(fhir: &serde_json::Value) -> String {
 /// Build the Contract-3 `/api/queue` JSON array from the store, newest-first.
 fn build_queue_json(store: &Store) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
-    let rows = store.list_delivered()?;
-    let items: Vec<serde_json::Value> = rows
+    let items: Vec<serde_json::Value> = store
+        .list_queue()?
         .into_iter()
-        .map(|(id, received_at, _kind)| {
+        .map(|entry| {
             json!({
-                "bundle_id": id.to_string(),
-                "state": "receipt_sent",
-                "symbols_received": 0,
-                "symbols_needed": 0,
-                "first_seen": received_at,
-                "completed_at": received_at,
+                "bundle_id": entry.bundle_id.to_string(),
+                "state": entry.state,
+                "symbols_received": entry.symbols_received,
+                "symbols_needed": entry.symbols_needed,
+                "first_seen": entry.first_seen,
+                "completed_at": entry.completed_at,
             })
         })
         .collect();
