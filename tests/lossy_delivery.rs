@@ -99,6 +99,11 @@ fn assert_survives_loss(bundle: &Bundle, key: &Key, loss: f64) {
 
 #[test]
 #[ignore = "H10 integration — needs real tgw-core; run: cargo test --test lossy_delivery -- --ignored"]
+// BLOCKED(PHASE-D): needs tgw-core `Key::from_file`, `encode_bundle`, and
+// `BundleReceiver::absorb` (Muaz's real core — all `todo!()` on Twaha's branch). The
+// `LossModel::decide` half (Phase C) is implemented; the encode/decode half panics until
+// Muaz's branch merges. Run jointly at the H10 checkpoint. The fuller gateway+proxy e2e
+// (store, DELIVERED receipts, priority, bounded timeout) is layered on in Phase E.
 fn vitals_and_image_survive_25pct_loss() {
     // A 32-byte PSK on disk (never committed). `Key::from_file` reads it once Muaz implements it.
     let key_path = std::env::temp_dir().join("tgw-integration-test.key");

@@ -5,8 +5,9 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::Context;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -24,21 +25,37 @@ struct Cli {
     /// HTTP bind address for the dashboard/API.
     #[arg(long, default_value = "0.0.0.0:8080")]
     http_addr: SocketAddr,
+    /// UDP bind address for incoming `DATA` frames (Phase-B shortcut; Phase F loads it from
+    /// the TOML config's `[net] listen_addr`).
+    #[arg(long, default_value = "0.0.0.0:47000")]
+    listen: SocketAddr,
+    /// Path to the redb database file (Phase-E shortcut; Phase F loads it from config).
+    #[arg(long, default_value = "gateway.redb")]
+    db: PathBuf,
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    // TODO(PHASE-F): load `cli.config` into a typed GatewayConfig (TOML + env overrides).
+    // TODO(PHASE-F): load `cli.config` into a typed GatewayConfig (TOML + env overrides) and
+    // derive `listen`/`http_addr`/`key_file`/db path from it instead of the CLI shortcuts.
     let _ = &cli.config;
 
-    let state = tgw_gateway::AppState {
-        static_dir: cli.static_dir,
+    let store = Arc::new(tgw_gateway::Store::open(&cli.db).context("open gateway store")?);
+
+    let state = tgw_gateway::StoreState {
+        base: tgw_gateway::AppState {
+            static_dir: cli.static_dir,
+        },
+        store: Arc::clone(&store),
     };
 
-    // TODO(PHASE-B): also spawn the UDP listener, e.g.
-    //   tokio::spawn(tgw_gateway::run_udp_listener(listen_addr));
-    tgw_gateway::run_http_server(cli.http_addr, state).await
+    // Run the UDP decode path and the HTTP API concurrently; neither blocks the other. If
+    // either errors (e.g. UDP bind fails), `try_join!` cancels the other and propagates.
+    let udp = tgw_gateway::run_udp_listener(cli.listen, Arc::clone(&store));
+    let http = tgw_gateway::run_http_server_store(cli.http_addr, state);
+    let ((), ()) = tokio::try_join!(udp, http)?;
+    Ok(())
 }
