@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0B1220">
+  <title>Link Console — Field ⟶ Hospital</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+
+<body>
+
+  <main class="wrap">
+
+    <!-- Header -->
+    <header class="top">
+      <h1 class="title">Link Console</h1>
+      <div class="top-right">
+        <span class="src" id="src-field"><i class="dot"></i>Field</span>
+        <span class="src" id="src-gw"><i class="dot"></i>Hospital</span>
+        <span class="src" id="src-sim"><i class="dot"></i>Sim</span>
+        <button type="button" class="gear" id="btn-settings" aria-label="Settings">Sources</button>
+      </div>
+    </header>
+
+    <!-- Simulation controls (the point of this screen) -->
+    <section class="card sim">
+      <div class="sim-head">
+        <h2 class="card-title">Link simulation</h2>
+        <span class="sim-sub" id="sim-sub">drives the live netsim proxy in the field ⟶ hospital path</span>
+      </div>
+
+      <div class="slider" id="slider-loss">
+        <div class="slider-top">
+          <label for="in-loss">Packet loss</label>
+          <output id="out-loss">25%</output>
+        </div>
+        <input type="range" id="in-loss" min="0" max="100" step="1" value="25">
+      </div>
+
+      <div class="slider" id="slider-corrupt">
+        <div class="slider-top">
+          <label for="in-corrupt">Corruption</label>
+          <output id="out-corrupt">0%</output>
+        </div>
+        <input type="range" id="in-corrupt" min="0" max="50" step="1" value="0">
+      </div>
+
+      <div class="slider" id="slider-rate">
+        <div class="slider-top">
+          <label for="in-rate">Bandwidth</label>
+          <output id="out-rate">56 kbps</output>
+        </div>
+        <input type="range" id="in-rate" min="8" max="256" step="4" value="56">
+      </div>
+
+      <div class="presets">
+        <button type="button" data-loss="0" data-corrupt="0" data-rate="256">Clear link</button>
+        <button type="button" data-loss="25" data-corrupt="0" data-rate="56">25% loss</button>
+        <button type="button" data-loss="40" data-corrupt="5" data-rate="56">40% + damage</button>
+        <button type="button" data-loss="100" data-corrupt="0" data-rate="56">Blackout</button>
+      </div>
+      <p class="sim-note" id="sim-note">Move a slider to change the link the field client is sending over.</p>
+    </section>
+
+    <!-- Headline stats -->
+    <section class="stats">
+      <div class="stat">
+        <span class="stat-num" data-metric="rate">—</span>
+        <span class="stat-lab">Delivered rate</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num" data-metric="delivered">0</span>
+        <span class="stat-lab">Delivered</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num stat-warn" data-metric="stuck">0</span>
+        <span class="stat-lab">Stuck</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num" data-metric="retries">0</span>
+        <span class="stat-lab">Retries</span>
+      </div>
+    </section>
+
+    <!-- One chart -->
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">Delivered over time</h2>
+        <span class="hint">confirmed at the hospital</span>
+      </div>
+      <div class="chart" id="chart-delivery"></div>
+    </section>
+
+    <!-- Triage strip -->
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">Patients by triage</h2>
+        <span class="hint" id="triage-total">0 total</span>
+      </div>
+      <div class="triage" id="triage"></div>
+    </section>
+
+    <footer class="foot" id="foot">Awaiting sources…</footer>
+
+  </main>
+
+  <!-- Settings drawer -->
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-label="Sources">
+    <h2>Sources</h2>
+    <p class="drawer-help">Where to reach each service. Saved on this device.</p>
+    <label>Field agent<input type="url" id="url-field" placeholder="http://localhost:8091" spellcheck="false"></label>
+    <label>Gateway<input type="url" id="url-gw" placeholder="http://localhost:8080" spellcheck="false"></label>
+    <label>Netsim control<input type="url" id="url-sim" placeholder="http://localhost:8088" spellcheck="false"></label>
+    <div class="drawer-actions">
+      <button type="button" class="btn-ghost" id="drawer-cancel">Cancel</button>
+      <button type="button" class="btn-solid" id="drawer-save">Save</button>
+    </div>
+  </aside>
+
+  <script src="../shared/store.js"></script>
+  <script src="app.js"></script>
+</body>
+
+</html>

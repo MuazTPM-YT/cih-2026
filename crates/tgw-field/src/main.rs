@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tgw_core::{Bundle, BundleSender, Config, FecConfig, Key, RetryConfig};
 use tokio::net::UdpSocket;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
 use tgw_field::breaker::{BreakerEvent, LinkBreaker, probe_budget};
@@ -727,11 +728,17 @@ async fn serve(config_path: &Path, http: &str, ui_dir: PathBuf) -> Result<()> {
         send_lock: tokio::sync::Mutex::new(()),
     });
 
+    // Read-only cross-origin GET so the metrics dashboard can poll /api/status from another
+    // origin. GET only, so a cross-origin page cannot POST /api/capture.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::GET]);
     let app = Router::new()
         .route("/api/capture", post(capture_handler))
         .route("/api/status", get(status_handler))
         // Anything else is served from the field UI directory (index.html, app.js, …).
         .fallback_service(ServeDir::new(&ui_dir))
+        .layer(cors)
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(http)

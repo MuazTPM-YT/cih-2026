@@ -13,3 +13,8 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
+# Live control server: a slider in the dashboard adjusts loss/bandwidth while traffic flows.
+axum.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true

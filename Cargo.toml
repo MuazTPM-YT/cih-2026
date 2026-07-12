@@ -29,7 +29,7 @@ raptorq = "2.0.1"
 redb = "4.1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "sync", "fs", "io-util", "signal"] }
 axum = "0.8"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 clap = { version = "4.6", features = ["derive"] }
 anyhow = "1"
 thiserror = "2"
