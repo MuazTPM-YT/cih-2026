@@ -5,172 +5,121 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0B1220">
-  <title>Telemetry Console — Field ⟶ Hospital</title>
+  <title>Link Console — Field ⟶ Hospital</title>
   <link rel="stylesheet" href="app.css">
 </head>
 
-<body data-palette="#2DD4BF,#22C55E,#F97316,#DC2626">
+<body>
 
-  <div class="console">
+  <main class="wrap">
 
-    <!-- ============ HEADER ============ -->
-    <header class="console-head">
-      <div class="brand">
-        <span class="brand-glyph" aria-hidden="true"></span>
-        <span class="brand-name">Telemetry Console</span>
-        <span class="brand-sub">field&nbsp;⟶&nbsp;hospital link monitor</span>
-      </div>
-      <div class="head-right">
-        <span class="uptime" id="uptime" title="Console uptime">00:00:00</span>
-        <button type="button" class="gear-btn" id="btn-settings" aria-label="Sources">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
-        </button>
+    <!-- Header -->
+    <header class="top">
+      <h1 class="title">Link Console</h1>
+      <div class="top-right">
+        <span class="src" id="src-field"><i class="dot"></i>Field</span>
+        <span class="src" id="src-gw"><i class="dot"></i>Hospital</span>
+        <span class="src" id="src-sim"><i class="dot"></i>Sim</span>
+        <button type="button" class="gear" id="btn-settings" aria-label="Settings">Sources</button>
       </div>
     </header>
 
-    <!-- ============ SIGNATURE: LINK BAR ============ -->
-    <section class="linkbar" aria-label="Link status">
-      <div class="endpoint" id="ep-field">
-        <span class="ep-role">Field</span>
-        <span class="ep-state"><span class="ep-dot"></span><span class="ep-word" id="field-state">—</span></span>
-        <span class="ep-meta" id="field-meta">no source</span>
+    <!-- Simulation controls (the point of this screen) -->
+    <section class="card sim">
+      <div class="sim-head">
+        <h2 class="card-title">Link simulation</h2>
+        <span class="sim-sub" id="sim-sub">drives the live netsim proxy in the field ⟶ hospital path</span>
       </div>
 
-      <div class="link-channel">
-        <svg class="wave" id="wave" viewBox="0 0 600 80" preserveAspectRatio="none" aria-hidden="true">
-          <path class="wave-path wave-back" id="wave-back" d=""></path>
-          <path class="wave-path wave-front" id="wave-front" d=""></path>
-        </svg>
-        <div class="link-readout">
-          <span class="link-rate" id="link-rate">— %</span>
-          <span class="link-caption">delivered</span>
+      <div class="slider" id="slider-loss">
+        <div class="slider-top">
+          <label for="in-loss">Packet loss</label>
+          <output id="out-loss">25%</output>
         </div>
+        <input type="range" id="in-loss" min="0" max="100" step="1" value="25">
       </div>
 
-      <div class="endpoint endpoint-hospital" id="ep-hospital">
-        <span class="ep-role">Hospital</span>
-        <span class="ep-state"><span class="ep-dot"></span><span class="ep-word" id="gw-state">—</span></span>
-        <span class="ep-meta" id="gw-meta">no source</span>
+      <div class="slider" id="slider-corrupt">
+        <div class="slider-top">
+          <label for="in-corrupt">Corruption</label>
+          <output id="out-corrupt">0%</output>
+        </div>
+        <input type="range" id="in-corrupt" min="0" max="50" step="1" value="0">
+      </div>
+
+      <div class="slider" id="slider-rate">
+        <div class="slider-top">
+          <label for="in-rate">Bandwidth</label>
+          <output id="out-rate">56 kbps</output>
+        </div>
+        <input type="range" id="in-rate" min="8" max="256" step="4" value="56">
+      </div>
+
+      <div class="presets">
+        <button type="button" data-loss="0" data-corrupt="0" data-rate="256">Clear link</button>
+        <button type="button" data-loss="25" data-corrupt="0" data-rate="56">25% loss</button>
+        <button type="button" data-loss="40" data-corrupt="5" data-rate="56">40% + damage</button>
+        <button type="button" data-loss="100" data-corrupt="0" data-rate="56">Blackout</button>
+      </div>
+      <p class="sim-note" id="sim-note">Move a slider to change the link the field client is sending over.</p>
+    </section>
+
+    <!-- Headline stats -->
+    <section class="stats">
+      <div class="stat">
+        <span class="stat-num" data-metric="rate">—</span>
+        <span class="stat-lab">Delivered rate</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num" data-metric="delivered">0</span>
+        <span class="stat-lab">Delivered</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num stat-warn" data-metric="stuck">0</span>
+        <span class="stat-lab">Stuck</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num" data-metric="retries">0</span>
+        <span class="stat-lab">Retries</span>
       </div>
     </section>
 
-    <!-- ============ KPI TILES ============ -->
-    <section class="kpi-row" aria-label="Key metrics">
-      <article class="kpi" id="kpi-delivered">
-        <span class="kpi-label">Delivered</span>
-        <span class="kpi-value" data-metric="delivered">0</span>
-        <span class="kpi-foot">bundles at hospital</span>
-      </article>
-      <article class="kpi" id="kpi-inflight">
-        <span class="kpi-label">In flight</span>
-        <span class="kpi-value" data-metric="inflight">0</span>
-        <span class="kpi-foot">queued + sending</span>
-      </article>
-      <article class="kpi kpi-accent" id="kpi-rate">
-        <span class="kpi-label">Success rate</span>
-        <span class="kpi-value" data-metric="rate">—</span>
-        <span class="kpi-foot">delivered ÷ attempted</span>
-      </article>
-      <article class="kpi" id="kpi-stuck">
-        <span class="kpi-label">Stuck</span>
-        <span class="kpi-value" data-metric="stuck">0</span>
-        <span class="kpi-foot">kept, never dropped</span>
-      </article>
-      <article class="kpi kpi-critical" id="kpi-critical">
-        <span class="kpi-label">Critical patients</span>
-        <span class="kpi-value" data-metric="critical">0</span>
-        <span class="kpi-foot">triaged red</span>
-      </article>
-    </section>
-
-    <!-- ============ TIME SERIES ============ -->
-    <section class="panel panel-wide" aria-label="Delivery over time">
-      <div class="panel-head">
-        <h2 class="panel-title">Delivery over time</h2>
-        <span class="panel-note" id="series-note">cumulative bundles confirmed at the hospital</span>
+    <!-- One chart -->
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">Delivered over time</h2>
+        <span class="hint">confirmed at the hospital</span>
       </div>
-      <div class="chart-timeseries" id="chart-delivery"></div>
+      <div class="chart" id="chart-delivery"></div>
     </section>
 
-    <!-- ============ TWO-COLUMN: TRANSPORT | CLINICAL ============ -->
-    <div class="split">
+    <!-- Triage strip -->
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">Patients by triage</h2>
+        <span class="hint" id="triage-total">0 total</span>
+      </div>
+      <div class="triage" id="triage"></div>
+    </section>
 
-      <section class="panel" aria-label="Transport">
-        <div class="panel-head">
-          <h2 class="panel-title">Transport</h2>
-          <span class="eyebrow eyebrow-transport">link</span>
-        </div>
+    <footer class="foot" id="foot">Awaiting sources…</footer>
 
-        <div class="subpanel">
-          <span class="sub-label">Bundle state</span>
-          <div class="statebars" id="statebars"></div>
-        </div>
-
-        <div class="subpanel">
-          <span class="sub-label">Retries <span class="sub-hint">per poll</span></span>
-          <div class="sparkline" id="spark-retries"></div>
-        </div>
-
-        <div class="subpanel">
-          <span class="sub-label">In-flight decode <span class="sub-hint">symbols received</span></span>
-          <div class="inflight" id="inflight-bars">
-            <p class="empty-line">No bundle mid-flight.</p>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel" aria-label="Clinical">
-        <div class="panel-head">
-          <h2 class="panel-title">Clinical</h2>
-          <span class="eyebrow eyebrow-clinical">triage</span>
-        </div>
-
-        <div class="clinical-body">
-          <div class="donut-wrap" id="donut-wrap"></div>
-          <ul class="triage-legend" id="triage-legend"></ul>
-        </div>
-      </section>
-
-    </div>
-
-    <footer class="console-foot">
-      <span id="foot-source">Awaiting sources…</span>
-      <button type="button" class="table-toggle" id="btn-table" aria-expanded="false">Data view</button>
-    </footer>
-
-    <!-- Accessible table fallback (all current numbers, no color needed) -->
-    <table class="data-table" id="data-table" hidden>
-      <caption>Current metrics snapshot</caption>
-      <tbody id="data-table-body"></tbody>
-    </table>
-
-  </div>
+  </main>
 
   <!-- Settings drawer -->
-  <div class="drawer-scrim" id="drawer-scrim" hidden></div>
-  <aside class="drawer" id="drawer" hidden aria-label="Source settings">
-    <h2 class="drawer-title">Sources</h2>
-    <p class="drawer-help">Point the console at the field agent and the gateway. Values are saved on this device.</p>
-    <label class="drawer-field">
-      <span>Field agent URL</span>
-      <input type="url" id="input-field-url" placeholder="http://localhost:8091" spellcheck="false">
-    </label>
-    <label class="drawer-field">
-      <span>Gateway URL</span>
-      <input type="url" id="input-gw-url" placeholder="http://localhost:8080" spellcheck="false">
-    </label>
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-label="Sources">
+    <h2>Sources</h2>
+    <p class="drawer-help">Where to reach each service. Saved on this device.</p>
+    <label>Field agent<input type="url" id="url-field" placeholder="http://localhost:8091" spellcheck="false"></label>
+    <label>Gateway<input type="url" id="url-gw" placeholder="http://localhost:8080" spellcheck="false"></label>
+    <label>Netsim control<input type="url" id="url-sim" placeholder="http://localhost:8088" spellcheck="false"></label>
     <div class="drawer-actions">
-      <button type="button" class="btn-secondary" id="btn-drawer-cancel">Cancel</button>
-      <button type="button" class="btn-primary" id="btn-drawer-save">Save &amp; reconnect</button>
+      <button type="button" class="btn-ghost" id="drawer-cancel">Cancel</button>
+      <button type="button" class="btn-solid" id="drawer-save">Save</button>
     </div>
-    <p class="drawer-foot">Unreachable sources fall back to the shared browser store, then to demo data.</p>
   </aside>
 
-  <!-- shared field/hospital store (present only when served same-origin as the other UIs) -->
   <script src="../shared/store.js"></script>
   <script src="app.js"></script>
 </body>

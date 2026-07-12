@@ -6,6 +6,8 @@
 //! path applies loss + pacing + jitter, the reverse path relays gateway receipts/NACKs back.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -13,6 +15,58 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, sleep};
+
+/// Live, thread-safe link controls the proxy reads **per packet**, so loss, corruption, and
+/// bandwidth can be changed at runtime (e.g. from a slider) while traffic is flowing. Cloneable:
+/// every clone shares the same underlying atomics, so an HTTP control handler and the proxy loop
+/// see each other's writes immediately. Values outside their valid range are clamped on write.
+#[derive(Clone)]
+pub struct LinkControls {
+    loss: Arc<AtomicU64>,    // f64 bits, 0.0..=1.0
+    corrupt: Arc<AtomicU64>, // f64 bits, 0.0..=1.0
+    rate_bps: Arc<AtomicU64>,
+}
+
+impl LinkControls {
+    /// Seed the controls from a static config's starting values.
+    #[must_use]
+    pub fn from_config(cfg: &NetsimConfig) -> Self {
+        Self {
+            loss: Arc::new(AtomicU64::new(cfg.loss.clamp(0.0, 1.0).to_bits())),
+            corrupt: Arc::new(AtomicU64::new(cfg.corrupt.clamp(0.0, 1.0).to_bits())),
+            rate_bps: Arc::new(AtomicU64::new(cfg.rate_bps.max(1))),
+        }
+    }
+
+    /// Current drop probability (0.0..=1.0).
+    #[must_use]
+    pub fn loss(&self) -> f64 {
+        f64::from_bits(self.loss.load(Ordering::Relaxed))
+    }
+    /// Set the drop probability; clamped to 0.0..=1.0.
+    pub fn set_loss(&self, v: f64) {
+        self.loss.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+    /// Current corruption probability (0.0..=1.0).
+    #[must_use]
+    pub fn corrupt(&self) -> f64 {
+        f64::from_bits(self.corrupt.load(Ordering::Relaxed))
+    }
+    /// Set the corruption probability; clamped to 0.0..=1.0.
+    pub fn set_corrupt(&self, v: f64) {
+        self.corrupt
+            .store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+    /// Current bandwidth cap in bits/second.
+    #[must_use]
+    pub fn rate_bps(&self) -> u64 {
+        self.rate_bps.load(Ordering::Relaxed)
+    }
+    /// Set the bandwidth cap; forced to at least 1 bps so the pacer stays meaningful.
+    pub fn set_rate_bps(&self, v: u64) {
+        self.rate_bps.store(v.max(1), Ordering::Relaxed);
+    }
+}
 
 /// Degradation profile for the proxy. Deterministic for a given `seed`.
 #[derive(Debug, Clone)]
@@ -99,6 +153,21 @@ pub async fn run_proxy(
     listen: SocketAddr,
     forward: SocketAddr,
 ) -> anyhow::Result<()> {
+    // A static run is a controlled run whose controls never change: the LossModel RNG sequence
+    // is identical, so determinism (and the evidence harness) is preserved.
+    let controls = LinkControls::from_config(&cfg);
+    run_proxy_controlled(cfg, listen, forward, controls).await
+}
+
+/// Run the proxy with **live** [`LinkControls`]: loss, corruption, and bandwidth are read fresh
+/// from `controls` on every packet, so an external writer (the control server / a slider) changes
+/// the link while traffic flows. Otherwise identical to [`run_proxy`].
+pub async fn run_proxy_controlled(
+    cfg: NetsimConfig,
+    listen: SocketAddr,
+    forward: SocketAddr,
+    controls: LinkControls,
+) -> anyhow::Result<()> {
     cfg.validate()?;
     let field_sock = UdpSocket::bind(listen)
         .await
@@ -123,17 +192,17 @@ pub async fn run_proxy(
                 let (n, src) = received.context("netsim: receive field datagram")?;
                 field_addr = Some(src);
                 let elapsed = start.elapsed();
-                if loss.decide(elapsed) {
+                if loss.decide_with(elapsed, controls.loss()) {
                     tracing::trace!(bytes = n, "netsim: dropping forward datagram");
                     continue;
                 }
                 // A survivor may still arrive damaged. The gateway's integrity tag must reject
                 // this before RaptorQ absorbs it; here we only inject the damage.
-                if corruptor.corrupt(&mut field_buf[..n]) {
+                if corruptor.corrupt_with(&mut field_buf[..n], controls.corrupt()) {
                     tracing::trace!(bytes = n, "netsim: corrupted forward datagram");
                 }
                 let packet_bits = u64::try_from(n.saturating_mul(8)).unwrap_or(u64::MAX);
-                let pace_delay = pacer.schedule(elapsed, packet_bits);
+                let pace_delay = pacer.schedule_with(elapsed, packet_bits, controls.rate_bps());
                 let jitter_nanos = jitter_rng.gen_range(0..=cfg.jitter.as_nanos());
                 let total_delay = pace_delay + Duration::from_nanos(jitter_nanos as u64);
                 if !total_delay.is_zero() {
@@ -198,7 +267,15 @@ impl LossModel {
     /// Decide whether to drop the current datagram at `elapsed` since start.
     /// `true` = drop. See the type docs for the exact, deterministic semantics.
     pub fn decide(&mut self, elapsed: Duration) -> bool {
-        let random_drop = self.rng.gen_bool(self.cfg.loss);
+        self.decide_with(elapsed, self.cfg.loss)
+    }
+
+    /// Like [`LossModel::decide`] but with a caller-supplied loss probability, so a live control
+    /// can change the drop rate per packet. `loss` is clamped to 0.0..=1.0. The burst schedule
+    /// still comes from the config; the RNG stream is unchanged, so a fixed `loss` reproduces
+    /// [`LossModel::decide`] exactly.
+    pub fn decide_with(&mut self, elapsed: Duration, loss: f64) -> bool {
+        let random_drop = self.rng.gen_bool(loss.clamp(0.0, 1.0));
         self.in_burst_window(elapsed) || random_drop
     }
 
@@ -238,7 +315,13 @@ impl Corruptor {
 
     /// Possibly flip one bit of `packet` in place. `true` = the datagram was modified.
     pub fn corrupt(&mut self, packet: &mut [u8]) -> bool {
-        if packet.is_empty() || !self.rng.gen_bool(self.prob) {
+        self.corrupt_with(packet, self.prob)
+    }
+
+    /// Like [`Corruptor::corrupt`] but with a caller-supplied probability, for live control.
+    /// `prob` is clamped to 0.0..=1.0.
+    pub fn corrupt_with(&mut self, packet: &mut [u8], prob: f64) -> bool {
+        if packet.is_empty() || !self.rng.gen_bool(prob.clamp(0.0, 1.0)) {
             return false;
         }
         let byte = self.rng.gen_range(0..packet.len());
@@ -273,15 +356,52 @@ impl Pacer {
 
     /// Return the delay (from `now`) before a `packet_bits`-bit datagram may be sent.
     pub fn schedule(&mut self, now: Duration, packet_bits: u64) -> Duration {
+        self.schedule_with(now, packet_bits, self.rate_bps)
+    }
+
+    /// Like [`Pacer::schedule`] but with a caller-supplied rate, for live bandwidth control.
+    /// A `rate_bps` of 0 is treated as "no cap" (zero transmit time).
+    pub fn schedule_with(&mut self, now: Duration, packet_bits: u64, rate_bps: u64) -> Duration {
         let send_at = now.max(self.available_at);
         let delay = send_at.saturating_sub(now);
-        // Transmit time for this packet: packet_bits / rate_bps seconds.
-        let transmit = if self.rate_bps == 0 {
+        let transmit = if rate_bps == 0 {
             Duration::ZERO
         } else {
-            Duration::from_secs_f64(packet_bits as f64 / self.rate_bps as f64)
+            Duration::from_secs_f64(packet_bits as f64 / rate_bps as f64)
         };
         self.available_at = send_at + transmit;
         delay
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn link_controls_clamp_and_share() {
+        let cfg = NetsimConfig { loss: 0.1, corrupt: 0.0, rate_bps: 64_000, ..NetsimConfig::default() };
+        let a = LinkControls::from_config(&cfg);
+        let b = a.clone(); // shares the same atomics
+        a.set_loss(0.9);
+        assert!((b.loss() - 0.9).abs() < 1e-9, "clones observe each other's writes");
+        a.set_loss(5.0);
+        assert!((b.loss() - 1.0).abs() < 1e-9, "loss clamps to 1.0");
+        a.set_loss(-1.0);
+        assert!(b.loss().abs() < 1e-9, "loss clamps to 0.0");
+        a.set_rate_bps(0);
+        assert_eq!(b.rate_bps(), 1, "rate is forced to >= 1");
+    }
+
+    #[test]
+    fn live_loss_flips_drop_behavior() {
+        let cfg = NetsimConfig { loss: 0.0, burst_every: Duration::from_secs(3600), ..NetsimConfig::default() };
+        let mut model = LossModel::new(&cfg);
+        // With loss 0.0 nothing drops (well outside any burst window at t=0).
+        let dropped_at_zero: u32 = (0..200).map(|_| u32::from(model.decide_with(Duration::ZERO, 0.0))).sum();
+        assert_eq!(dropped_at_zero, 0, "0% loss drops nothing");
+        // Turn loss up to 100% live: everything drops now.
+        let dropped_at_full: u32 = (0..200).map(|_| u32::from(model.decide_with(Duration::ZERO, 1.0))).sum();
+        assert_eq!(dropped_at_full, 200, "100% loss drops everything");
     }
 }
