@@ -940,11 +940,9 @@ function handleSubmit(e) {
     })
     .catch(err => console.error("failed to prepare case images", err));
 
-  // Bridge to the REAL send path: POST the vitals to the local field agent
-  // (`tgw-field serve`), which seals + RaptorQ-encodes + sends over UDP to the gateway and
-  // returns the true delivery outcome. If no bridge is reachable (e.g. the UI is served from a
-  // plain static server), fall back to the local transmit simulation so the standalone demo
-  // still works.
+  // Hand the capture to the resilient sync engine below: real send path when the
+  // local field agent is up, persistent browser outbox when it is not. The card's
+  // status chip always reflects where the capture truly is — never a simulation.
   patient.status = "transmitting";
   updateSentList();
 
@@ -953,38 +951,48 @@ function handleSubmit(e) {
     $btnSend.classList.remove("sending");
   };
 
-  sendToBackend(patient)
-    .then(result => {
-      if (result.rejected) {
-        patient.status = "error";
-        patient.statusDetail = result.message;
-      } else {
-        patient.status = result.delivered ? "delivered" : "stuck";
-        if (result.short_id) patient.bundleId = result.short_id;
-      }
-      updateSentList();
-      restoreButton();
-      if (!result.rejected) clearForm();
-    })
-    .catch(() => {
-      // Bridge unreachable — keep the old local simulation so the standalone UI still demos.
-      const recovered = Math.random() < 0.15;
-      setTimeout(() => {
-        patient.status = recovered ? "recovered" : "delivered";
-        updateSentList();
-        restoreButton();
-        clearForm();
-      }, 1600);
-    });
+  submitCapture(patient).finally(restoreButton);
 }
 
-// Bridge a capture to the local field agent's real UDP send path (`tgw-field serve`).
-// Resolves with the agent's JSON result ({ short_id, state, delivered }) on a reachable bridge —
-// including a { rejected, message } shape for a 4xx (e.g. vitals outside the input bounds).
-// Rejects ONLY when the bridge is unreachable, so the caller can fall back to the simulation.
-async function sendToBackend(patient) {
+// =====================================================
+// RESILIENT SYNC ENGINE
+// =====================================================
+//
+// Three layers of persistence sit between a tap on "Submit" and the specialist:
+//   1. this browser's outbox (localStorage)  — survives the local agent being down;
+//   2. the agent's redb store-and-forward queue — survives reboot / power loss;
+//   3. RaptorQ FEC over UDP + AEAD receipts     — survives >20% loss on the radio.
+// Captures are POSTed with wait=false: the agent replies the moment the bundle is
+// durably queued, then /api/status is polled for the true state (queued → sending →
+// delivered ✓ / STUCK). If the agent is unreachable, the capture is stored in the
+// outbox and flushed automatically with exponential backoff and on the browser's
+// 'online' event. Nothing is ever reported delivered without a verified receipt.
+
+const OUTBOX_KEY = "tgw-field-outbox-v1";
+const OUTBOX_BACKOFF_MIN_MS = 1000;
+const OUTBOX_BACKOFF_MAX_MS = 30000;
+const STATUS_POLL_MS = 2500;
+
+let outboxTimer = null;
+let outboxBackoffMs = OUTBOX_BACKOFF_MIN_MS;
+const watchedCards = new Set();
+let statusTimer = null;
+
+function loadOutbox() {
+  try {
+    const raw = localStorage.getItem(OUTBOX_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+function saveOutbox(entries) {
+  try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(entries)); }
+  catch (err) { console.error("outbox save failed", err); }
+}
+
+function buildCapturePayload(patient) {
   const v = patient.vitals || {};
-  const body = {
+  return {
     patient: patient.patientId,
     device: "field-ui",
     performer: "field-worker",
@@ -993,24 +1001,150 @@ async function sendToBackend(patient) {
     spo2:   v.spo2  != null ? v.spo2  : null,
     pulse:  v.pulse != null ? v.pulse : null,
   };
-  let res;
-  try {
-    res = await fetch("/api/capture", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  } catch (e) {
-    const err = new Error("field bridge unreachable");
-    err.bridgeUnreachable = true;
-    throw err;
-  }
+}
+
+// POST one capture to the local agent. Resolves with the agent's JSON (including a
+// { rejected, message } shape for a 4xx); REJECTS only when the agent is unreachable.
+async function postCapture(payload) {
+  const res = await fetch("/api/capture?wait=false", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
   if (!res.ok) {
     const message = await res.text().catch(() => res.statusText);
     return { rejected: true, delivered: false, message };
   }
   return res.json();
 }
+
+async function submitCapture(patient) {
+  const payload = buildCapturePayload(patient);
+  try {
+    const result = await postCapture(payload);
+    applyCaptureResult(patient, result);
+    if (!result.rejected) clearForm();
+  } catch (_) {
+    // Agent unreachable (WiFi off, agent not started): persist to the outbox and keep
+    // the card honest. The flusher retries with exponential backoff; the capture is
+    // transmitted the moment connectivity returns — no data loss, no fake "delivered".
+    enqueueOutbox(patient, payload);
+    patient.status = "offline";
+    clearForm();
+  }
+  updateSentList();
+}
+
+function applyCaptureResult(patient, result) {
+  if (result.rejected) {
+    patient.status = "error";
+    patient.statusDetail = result.message;
+    return;
+  }
+  if (result.short_id) patient.bundleId = result.short_id;
+  // wait=false answers "queued" once durably stored on the device; delivery progress
+  // arrives via the status poller. (A wait=true caller would get the final state here.)
+  const resultState = String(result.state || "").toLowerCase();
+  patient.status = result.delivered ? "delivered" : (resultState.startsWith("stuck") ? "stuck" : "queued");
+  if (patient.status !== "delivered") watchCard(patient);
+}
+
+function enqueueOutbox(patient, payload) {
+  const entries = loadOutbox();
+  // Persist the payload plus enough of the card to restore the sent-list on reload
+  // (images stay out of the outbox — they ride the shared case store, not this path).
+  const cardCopy = { ...patient, images: [], status: "offline" };
+  entries.push({ id: patient.id, payload, card: cardCopy, queuedAt: new Date().toISOString() });
+  saveOutbox(entries);
+  scheduleOutboxFlush(outboxBackoffMs);
+}
+
+function scheduleOutboxFlush(delayMs) {
+  if (outboxTimer) return; // one pending attempt at a time
+  outboxTimer = setTimeout(() => { outboxTimer = null; flushOutbox(); }, delayMs);
+}
+
+// Drain the outbox in capture order. Stops (and backs off exponentially) at the first
+// unreachable error so ordering is preserved; resets the backoff after any success.
+async function flushOutbox() {
+  const entries = loadOutbox();
+  if (entries.length === 0) return;
+  while (entries.length > 0) {
+    const entry = entries[0];
+    let result;
+    try {
+      result = await postCapture(entry.payload);
+    } catch (_) {
+      outboxBackoffMs = Math.min(outboxBackoffMs * 2, OUTBOX_BACKOFF_MAX_MS);
+      scheduleOutboxFlush(outboxBackoffMs);
+      return;
+    }
+    entries.shift();
+    saveOutbox(entries);
+    outboxBackoffMs = OUTBOX_BACKOFF_MIN_MS;
+    const card = sentItems.find(i => i.id === entry.id);
+    if (card) { applyCaptureResult(card, result); }
+    updateSentList();
+  }
+}
+
+// Restore captures that were queued offline in a previous session.
+function restoreOutbox() {
+  const entries = loadOutbox();
+  for (const entry of entries) {
+    if (entry.card && !sentItems.some(i => i.id === entry.id)) {
+      sentItems.push({ ...entry.card, status: "offline" });
+    }
+  }
+  if (entries.length > 0) {
+    updateSentList();
+    scheduleOutboxFlush(200); // try almost immediately on load
+  }
+}
+
+// --- True-state tracking: poll the agent's queue until every card settles ---
+function watchCard(card) {
+  watchedCards.add(card);
+  if (!statusTimer) {
+    statusTimer = setInterval(pollAgentStatus, STATUS_POLL_MS);
+    pollAgentStatus();
+  }
+}
+
+async function pollAgentStatus() {
+  if (watchedCards.size === 0) {
+    clearInterval(statusTimer);
+    statusTimer = null;
+    return;
+  }
+  let data;
+  try {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) return;
+    data = await res.json();
+  } catch (_) {
+    return; // agent briefly down: keep last known states; the outbox owns reconnection
+  }
+  const stateByShortId = new Map((data.queue || []).map(r => [r.short_id, r.state]));
+  let changed = false;
+  for (const card of [...watchedCards]) {
+    // Agent labels are human-facing ("delivered ✓", "STUCK (kept)") — match by prefix.
+    const state = String(stateByShortId.get(card.bundleId) || "").toLowerCase();
+    if (!state) continue;
+    const mapped =
+      state.startsWith("delivered") ? "delivered" :
+      state.startsWith("stuck")     ? "stuck" :
+      state.startsWith("sending")   ? "transmitting" : "queued";
+    if (card.status !== mapped) { card.status = mapped; changed = true; }
+    if (mapped === "delivered") watchedCards.delete(card); // stuck stays watched: the daemon may still revive it
+  }
+  if (changed) updateSentList();
+}
+
+// Flush triggers: browser regaining connectivity, or the tab becoming visible again.
+window.addEventListener("online", () => { outboxBackoffMs = OUTBOX_BACKOFF_MIN_MS; scheduleOutboxFlush(0); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) scheduleOutboxFlush(0); });
+restoreOutbox();
 
 function clearForm() {
   $patientId.value = nextPatientId();
@@ -1101,7 +1235,17 @@ function updateSentList() {
 }
 
 function statusChipHtml(status) {
-  const labels = { preparing: "Preparing", transmitting: "Transmitting", delivered: "Delivered", recovered: "Recovered via FEC", failed: "Failed", stuck: "Kept (STUCK)", error: "Rejected" };
+  const labels = {
+    preparing: "Preparing",
+    offline: "Offline — saved locally",
+    queued: "Queued on device",
+    transmitting: "Transmitting",
+    delivered: "Delivered ✓",
+    recovered: "Recovered via FEC",
+    failed: "Failed",
+    stuck: "Kept (STUCK)",
+    error: "Rejected",
+  };
   return '<span class="status-chip status-' + status + '"><span class="status-dot"></span>' + (labels[status] || status) + '</span>';
 }
 

@@ -45,7 +45,8 @@ impl LinkControls {
     }
     /// Set the drop probability; clamped to 0.0..=1.0.
     pub fn set_loss(&self, v: f64) {
-        self.loss.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.loss
+            .store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
     /// Current corruption probability (0.0..=1.0).
     #[must_use]
@@ -380,11 +381,19 @@ mod control_tests {
 
     #[test]
     fn link_controls_clamp_and_share() {
-        let cfg = NetsimConfig { loss: 0.1, corrupt: 0.0, rate_bps: 64_000, ..NetsimConfig::default() };
+        let cfg = NetsimConfig {
+            loss: 0.1,
+            corrupt: 0.0,
+            rate_bps: 64_000,
+            ..NetsimConfig::default()
+        };
         let a = LinkControls::from_config(&cfg);
         let b = a.clone(); // shares the same atomics
         a.set_loss(0.9);
-        assert!((b.loss() - 0.9).abs() < 1e-9, "clones observe each other's writes");
+        assert!(
+            (b.loss() - 0.9).abs() < 1e-9,
+            "clones observe each other's writes"
+        );
         a.set_loss(5.0);
         assert!((b.loss() - 1.0).abs() < 1e-9, "loss clamps to 1.0");
         a.set_loss(-1.0);
@@ -395,13 +404,21 @@ mod control_tests {
 
     #[test]
     fn live_loss_flips_drop_behavior() {
-        let cfg = NetsimConfig { loss: 0.0, burst_every: Duration::from_secs(3600), ..NetsimConfig::default() };
+        let cfg = NetsimConfig {
+            loss: 0.0,
+            burst_every: Duration::from_secs(3600),
+            ..NetsimConfig::default()
+        };
         let mut model = LossModel::new(&cfg);
         // With loss 0.0 nothing drops (well outside any burst window at t=0).
-        let dropped_at_zero: u32 = (0..200).map(|_| u32::from(model.decide_with(Duration::ZERO, 0.0))).sum();
+        let dropped_at_zero: u32 = (0..200)
+            .map(|_| u32::from(model.decide_with(Duration::ZERO, 0.0)))
+            .sum();
         assert_eq!(dropped_at_zero, 0, "0% loss drops nothing");
         // Turn loss up to 100% live: everything drops now.
-        let dropped_at_full: u32 = (0..200).map(|_| u32::from(model.decide_with(Duration::ZERO, 1.0))).sum();
+        let dropped_at_full: u32 = (0..200)
+            .map(|_| u32::from(model.decide_with(Duration::ZERO, 1.0)))
+            .sum();
         assert_eq!(dropped_at_full, 200, "100% loss drops everything");
     }
 }

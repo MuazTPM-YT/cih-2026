@@ -9,6 +9,7 @@
 
 pub mod breaker;
 pub mod discovery;
+pub mod metrics;
 pub mod pacer;
 pub mod pairing;
 pub mod queue;
