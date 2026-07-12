@@ -30,8 +30,18 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use uuid::Uuid;
+
+/// Read-only cross-origin access for the metrics dashboard: any origin may issue GET (and the
+/// preflight OPTIONS) against the public JSON API. No credentials, GET only — the dashboard
+/// polls `/api/queue` and `/api/observations`; nothing here mutates state.
+fn metrics_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::GET])
+}
 
 mod store;
 /// Redb-backed persistence for delivered bundles and gateway queue state.
@@ -139,6 +149,7 @@ pub fn router_with_store(state: StoreState) -> Router {
         .route("/api/images/{bundle_id}", get(get_image_store))
         .route("/naive-upload", post(naive_upload))
         .fallback_service(ServeDir::new(static_dir))
+        .layer(metrics_cors())
         .with_state(state)
 }
 

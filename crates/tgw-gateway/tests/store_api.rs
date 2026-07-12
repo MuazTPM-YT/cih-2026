@@ -165,3 +165,28 @@ async fn unknown_image_is_404_never_500() {
     let (status, _ctype, _body) = get(&state, &format!("/api/images/{}", Uuid::new_v4())).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn api_sets_cors_header_for_cross_origin_dashboard() {
+    // The metrics dashboard polls this API from another origin; a GET carrying an Origin must
+    // come back with an Access-Control-Allow-Origin header, or the browser blocks the read.
+    let (state, _v, _i) = seeded_state();
+    let res = router_with_store(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/queue")
+                .header(header::ORIGIN, "http://localhost:9999")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok()),
+        Some("*"),
+        "cross-origin GET must be allowed for the dashboard"
+    );
+}
