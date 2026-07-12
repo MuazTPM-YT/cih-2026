@@ -936,6 +936,15 @@ input[type="number"] { -moz-appearance: textfield; }
 .status-chip.status-recovered .status-dot { background: var(--status-recovered); }
 .status-chip.status-failed { background: rgba(220,38,38,0.12); color: var(--status-failed); }
 .status-chip.status-failed .status-dot { background: var(--status-failed); }
+/* Offline-first states: saved in the browser outbox / durably queued on the device */
+.status-chip.status-offline { background: rgba(100,116,139,0.15); color: #475569; }
+.status-chip.status-offline .status-dot { background: #64748B; }
+.status-chip.status-queued { background: rgba(59,130,246,0.12); color: var(--status-preparing); }
+.status-chip.status-queued .status-dot { background: var(--status-preparing); }
+.status-chip.status-stuck { background: rgba(220,38,38,0.12); color: var(--status-failed); }
+.status-chip.status-stuck .status-dot { background: var(--status-failed); }
+.status-chip.status-error { background: rgba(220,38,38,0.12); color: var(--status-failed); }
+.status-chip.status-error .status-dot { background: var(--status-failed); }
 
 /* Card appear animation */
 .patient-card { animation: card-appear 0.3s ease; }

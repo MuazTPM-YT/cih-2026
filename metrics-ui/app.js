@@ -33,13 +33,23 @@ const TRIAGE = [
 // ---------------------------------------------------------------------------
 // Pure metric functions (unit-checkable — see runSelfTest / ?selftest)
 // ---------------------------------------------------------------------------
+// The field agent's state labels are human-facing ("delivered ✓", "STUCK (kept)"),
+// so classify by prefix rather than exact match.
+function normalizeFieldState(raw) {
+  const state = String(raw || "").toLowerCase();
+  if (state.startsWith("delivered")) return "delivered";
+  if (state.startsWith("stuck")) return "stuck";
+  if (state.startsWith("sending") || state === "transmitting" || state === "preparing") return "sending";
+  if (state.startsWith("queued")) return "queued";
+  return null;
+}
+
 function tallyFieldQueue(queue) {
   const counts = { queued: 0, sending: 0, delivered: 0, stuck: 0 };
   let retries = 0;
   for (const row of queue || []) {
-    const state = String(row.state || "").toLowerCase();
-    if (state in counts) counts[state] += 1;
-    else if (state === "transmitting" || state === "preparing") counts.sending += 1;
+    const state = normalizeFieldState(row.state);
+    if (state) counts[state] += 1;
     retries += Number(row.retries) || 0;
   }
   return { counts, retries };
@@ -72,6 +82,16 @@ function computeClinical(cases, gwObs) {
   return { buckets, total: 0, source: "none" };
 }
 
+// Byte-level goodput from the field agent's session counters: what the link COST
+// (bytes_attempted: every datagram incl. FEC overhead + retries) vs what it ACHIEVED
+// (bytes_acked: envelope bytes confirmed by an authenticated receipt).
+function computeBytes(stats) {
+  if (!stats || !Number.isFinite(stats.bytes_attempted)) return { attempted: null, acked: null, efficiency: null };
+  const attempted = stats.bytes_attempted;
+  const acked = Number.isFinite(stats.bytes_acked) ? stats.bytes_acked : 0;
+  return { attempted, acked, efficiency: attempted > 0 ? Math.min(1, acked / attempted) : null };
+}
+
 function computeMetrics(sources) {
   const field = tallyFieldQueue(sources.fieldStatus && sources.fieldStatus.queue);
   const gw = tallyGatewayQueue(sources.gwQueue);
@@ -84,9 +104,11 @@ function computeMetrics(sources) {
   const successRate = attempted > 0 ? delivered / attempted : null;
 
   const clinical = computeClinical(sources.cases, sources.gwObs);
+  const bytes = computeBytes(sources.fieldStatus && sources.fieldStatus.stats);
   return {
     transport: { queued: counts.queued, sending: counts.sending, delivered, stuck: counts.stuck, attempted, retries: field.retries, successRate },
     clinical,
+    bytes,
     deliveredTotal: delivered,
   };
 }
@@ -215,7 +237,12 @@ async function poll() {
 
   const metrics = computeMetrics(sources);
   lastMetrics = metrics;
-  history.push({ t: Date.now(), delivered: metrics.deliveredTotal });
+  history.push({
+    t: Date.now(),
+    delivered: metrics.deliveredTotal,
+    attempted: metrics.bytes.attempted,
+    acked: metrics.bytes.acked,
+  });
   while (history.length > HISTORY) history.shift();
   render(metrics);
 }
@@ -229,13 +256,18 @@ function readStoreCases() {
 // Demo data — only when every data source is dark (sliders still drive netsim)
 // ---------------------------------------------------------------------------
 let mockT = 0;
-const mockState = { delivered: 14, stuck: 0 };
+const mockState = { delivered: 14, stuck: 0, bytesAttempted: 96_000, bytesAcked: 60_000 };
 function mockSources() {
   mockT += 1;
   const lossPct = readSliders().lossPct; // let the demo react to the loss slider too
   const goodChance = Math.max(0.05, 0.9 - lossPct / 130);
+  const deliveredBefore = mockState.delivered;
   if (Math.random() < goodChance) mockState.delivered += 1;
   if (Math.random() < lossPct / 900) mockState.stuck += 1;
+  // Demo byte counters mirror the real semantics: more loss ⇒ more repair overhead
+  // attempted per acknowledged byte, so the two lines visibly diverge on the chart.
+  mockState.bytesAttempted += Math.round(4200 * (1 + lossPct / 40));
+  if (mockState.delivered > deliveredBefore) mockState.bytesAcked += 3600;
   const sending = Math.max(0, Math.round((lossPct / 100) * 4));
   const retries = Math.round((lossPct / 100) * 12);
   const queue = [];
@@ -246,7 +278,13 @@ function mockSources() {
   const dist = [1, 3, 5, Math.max(1, mockState.delivered - 9)];
   const cases = [];
   priorities.forEach((p, i) => { for (let k = 0; k < dist[i]; k++) cases.push({ assessment: { priority: p } }); });
-  return { fieldStatus: { queue }, gwQueue: [], gwObs: Array.from({ length: mockState.delivered }, () => ({ flags: [] })), cases };
+  const stats = {
+    bytes_attempted: mockState.bytesAttempted,
+    bytes_acked: mockState.bytesAcked,
+    datagrams_sent: Math.round(mockState.bytesAttempted / 1100),
+    bundles_acked: mockState.delivered,
+  };
+  return { fieldStatus: { queue, stats }, gwQueue: [], gwObs: Array.from({ length: mockState.delivered }, () => ({ flags: [] })), cases };
 }
 
 // ---------------------------------------------------------------------------
@@ -258,8 +296,10 @@ function render(m) {
   setStat("delivered", t.delivered);
   setStat("stuck", t.stuck);
   setStat("retries", t.retries);
+  setStat("efficiency", m.bytes.efficiency == null ? "—" : Math.round(m.bytes.efficiency * 100) + "%");
   document.querySelector('[data-metric="stuck"]').classList.toggle("on", t.stuck > 0);
 
+  renderBytesChart($("chart-bytes"), history);
   renderChart($("chart-delivery"), history);
   renderTriage(m.clinical);
   paintSourceDots();
@@ -361,6 +401,76 @@ function renderChart(host, hist) {
   host.appendChild(svg);
 }
 
+// --- Chart: cumulative bytes attempted (amber, dashed) vs acknowledged (teal) ---
+function fmtBytes(n) {
+  if (n == null || !Number.isFinite(n)) return "—";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + " MB";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + " KB";
+  return n + " B";
+}
+
+function renderBytesChart(host, hist) {
+  if (!host) return;
+  host.innerHTML = "";
+  const rows = hist.filter((d) => d.attempted != null);
+  if (rows.length < 2) {
+    host.innerHTML = '<div class="chart-empty">Waiting for the field agent’s byte counters…</div>';
+    return;
+  }
+  const W = host.clientWidth || 760, H = host.clientHeight || 180;
+  const pad = { l: 46, r: 12, t: 12, b: 18 };
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+
+  const maxY = Math.max(1, ...rows.map((d) => d.attempted));
+  const x0 = pad.l, x1 = W - pad.r, y0 = H - pad.b, y1 = pad.t;
+  const sx = (i) => x0 + (i / (rows.length - 1)) * (x1 - x0);
+  const sy = (v) => y0 - (v / maxY) * (y0 - y1);
+
+  for (let g = 0; g <= 2; g++) {
+    const v = (maxY / 2) * g, yy = sy(v);
+    const l = document.createElementNS(SVGNS, "line");
+    l.setAttribute("class", "grid-line"); l.setAttribute("x1", x0); l.setAttribute("x2", x1); l.setAttribute("y1", yy); l.setAttribute("y2", yy);
+    svg.appendChild(l);
+    const tx = document.createElementNS(SVGNS, "text");
+    tx.setAttribute("class", "axis-text"); tx.setAttribute("x", 4); tx.setAttribute("y", yy + 3); tx.textContent = fmtBytes(Math.round(v));
+    svg.appendChild(tx);
+  }
+
+  const linePath = (key) => {
+    let d = "";
+    rows.forEach((row, i) => { d += (i === 0 ? "M" : "L") + sx(i).toFixed(1) + " " + sy(row[key] || 0).toFixed(1) + " "; });
+    return d;
+  };
+  const attemptedPath = document.createElementNS(SVGNS, "path");
+  attemptedPath.setAttribute("class", "series-line-attempted");
+  attemptedPath.setAttribute("d", linePath("attempted"));
+  svg.appendChild(attemptedPath);
+  const ackedPath = document.createElementNS(SVGNS, "path");
+  ackedPath.setAttribute("class", "series-line-acked");
+  ackedPath.setAttribute("d", linePath("acked"));
+  svg.appendChild(ackedPath);
+
+  const cross = document.createElementNS(SVGNS, "line"); cross.setAttribute("class", "crosshair"); cross.setAttribute("y1", y1); cross.setAttribute("y2", y0); cross.style.display = "none"; svg.appendChild(cross);
+  const overlay = document.createElementNS(SVGNS, "rect");
+  overlay.setAttribute("x", x0); overlay.setAttribute("y", y1); overlay.setAttribute("width", Math.max(0, x1 - x0)); overlay.setAttribute("height", Math.max(0, y0 - y1)); overlay.setAttribute("fill", "transparent");
+  overlay.addEventListener("mousemove", (e) => {
+    const rect = svg.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (W / rect.width);
+    const i = Math.max(0, Math.min(rows.length - 1, Math.round(((px - x0) / Math.max(1, x1 - x0)) * (rows.length - 1))));
+    const X = sx(i);
+    cross.style.display = ""; cross.setAttribute("x1", X); cross.setAttribute("x2", X);
+    const eff = rows[i].attempted > 0 ? Math.round(((rows[i].acked || 0) / rows[i].attempted) * 100) + "%" : "—";
+    showTip(e.clientX, rect.top + 24,
+      '<span class="tt-key">attempted</span> ' + fmtBytes(rows[i].attempted) +
+      ' · <span class="tt-key">acked</span> ' + fmtBytes(rows[i].acked) +
+      ' · <span class="tt-key">eff</span> ' + eff);
+  });
+  overlay.addEventListener("mouseleave", () => { cross.style.display = "none"; hideTip(); });
+  svg.appendChild(overlay);
+  host.appendChild(svg);
+}
+
 // --- Tooltip ---
 let tipEl = null;
 function showTip(x, y, html) {
@@ -416,6 +526,14 @@ function runSelfTest() {
   ok("clinical triage", c1.buckets.critical === 1 && c1.source === "triage");
   const c2 = computeClinical([], [{ flags: [] }, { flags: ["a", "b", "c"] }]);
   ok("clinical flags proxy", c2.buckets.stable === 1 && c2.buckets.critical === 1);
+  const b1 = computeBytes({ bytes_attempted: 10_000, bytes_acked: 7_500 });
+  ok("bytes efficiency", b1.efficiency === 0.75 && b1.attempted === 10_000);
+  const b2 = computeBytes(null);
+  ok("bytes absent stats", b2.attempted === null && b2.efficiency === null);
+  const b3 = computeBytes({ bytes_attempted: 0, bytes_acked: 0 });
+  ok("bytes zero attempted", b3.efficiency === null);
+  const m3 = computeMetrics({ fieldStatus: { queue: [{ state: "delivered ✓" }, { state: "STUCK (kept)" }] }, gwQueue: [], gwObs: null, cases: [] });
+  ok("live agent labels", m3.transport.delivered === 1 && m3.transport.stuck === 1);
   const passed = r.filter((x) => x.pass).length;
   console.table(r); console.log("[selftest] " + passed + "/" + r.length + " passed");
   return passed === r.length;

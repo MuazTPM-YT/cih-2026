@@ -107,6 +107,7 @@ pub async fn deliver_via_relay(
         bundle_id,
         datagrams: datagrams.to_vec(),
     });
+    crate::metrics::record_attempted(request.len());
     sock.send_to(&request, peer)
         .await
         .context("relay: send request to peer")?;

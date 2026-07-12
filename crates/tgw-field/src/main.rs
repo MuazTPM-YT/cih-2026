@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -451,6 +451,7 @@ async fn deliver_one(
     match outcome {
         Outcome::Delivered => {
             queue.set_state(record.id, BundleState::Delivered)?;
+            tgw_field::metrics::record_acked(record.envelope.len());
             println!(
                 "bundle {}  [{}]  delivered ✓  ({:.1}s)",
                 short_id(record.id),
@@ -528,6 +529,7 @@ async fn try_relay_failover(
     if relay_failover(&candidates, record.id, &datagrams, key, budget).await? == Outcome::Delivered
     {
         queue.set_state(record.id, BundleState::Delivered)?;
+        tgw_field::metrics::record_acked(record.envelope.len());
         println!(
             "bundle {}  [{}]  delivered ✓  via peer relay",
             short_id(record.id),
@@ -714,6 +716,20 @@ struct CaptureResult {
     delivered: bool,
 }
 
+/// Query options for `POST /api/capture`.
+#[derive(Debug, Deserialize)]
+struct CaptureQuery {
+    /// `wait=false` returns as soon as the bundle is durably queued and drains in the
+    /// background — the UI then polls `/api/status` for the true state. Defaults to
+    /// `true` (block until delivered/stuck), preserving the original behavior.
+    #[serde(default = "default_wait")]
+    wait: bool,
+}
+
+fn default_wait() -> bool {
+    true
+}
+
 /// Serve the browser field UI and bridge its captures onto the real UDP send path.
 async fn serve(config_path: &Path, http: &str, ui_dir: PathBuf) -> Result<()> {
     let config = Config::load(config_path)
@@ -760,6 +776,7 @@ async fn serve(config_path: &Path, http: &str, ui_dir: PathBuf) -> Result<()> {
 /// guards as the CLI, enqueue, and drain over UDP to the gateway (direct link, like `send-vitals`).
 async fn capture_handler(
     State(state): State<Arc<BridgeState>>,
+    Query(query): Query<CaptureQuery>,
     Json(payload): Json<CapturePayload>,
 ) -> Result<Json<CaptureResult>, (StatusCode, String)> {
     let bp = match (payload.bp_sys, payload.bp_dia) {
@@ -793,6 +810,26 @@ async fn capture_handler(
         .queue
         .enqueue(&record)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+
+    // Non-blocking mode: the bundle is durably queued (redb) — that is the offline-first
+    // guarantee — so answer immediately and drain in the background. Under a blackout the
+    // blocking mode would otherwise hold this HTTP request for the entire UDP retry
+    // budget and the browser would time out on a healthy local agent.
+    if !query.wait {
+        let bg = state.clone();
+        tokio::spawn(async move {
+            let _guard = bg.send_lock.lock().await;
+            if let Err(e) = drain_queue(&bg.config, &bg.key, &bg.target, &bg.queue, None).await {
+                tracing::warn!(error = %e, "background drain after capture failed");
+            }
+        });
+        return Ok(Json(CaptureResult {
+            bundle_id: bundle.id.to_string(),
+            short_id: short_id(bundle.id),
+            state: BundleState::Queued.label().to_string(),
+            delivered: false,
+        }));
+    }
 
     // Serialize the drain so concurrent captures don't interleave on the shared queue/socket.
     {
@@ -829,14 +866,22 @@ async fn status_handler(
         .into_iter()
         .map(|r| {
             serde_json::json!({
+                "bundle_id": r.id.to_string(),
                 "short_id": short_id(r.id),
                 "kind": r.kind,
                 "state": r.state.label(),
                 "retries": r.retries,
+                "bytes": r.envelope.len(),
             })
         })
         .collect();
-    Ok(Json(serde_json::json!({ "queue": items })))
+    Ok(Json(serde_json::json!({
+        "queue": items,
+        // Session transmission counters for the metrics dashboard: what the link cost
+        // (bytes_attempted, incl. FEC overhead + retries) vs what it achieved
+        // (bytes_acked = envelope bytes confirmed by an authenticated receipt).
+        "stats": tgw_field::metrics::snapshot(),
+    })))
 }
 
 async fn status(config_path: &Path, watch: bool) -> Result<()> {

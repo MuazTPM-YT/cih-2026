@@ -82,9 +82,26 @@
         <span class="stat-num" data-metric="retries">0</span>
         <span class="stat-lab">Retries</span>
       </div>
+      <div class="stat">
+        <span class="stat-num" data-metric="efficiency">—</span>
+        <span class="stat-lab">Link efficiency</span>
+      </div>
     </section>
 
-    <!-- One chart -->
+    <!-- Transmission efficiency: what the link cost vs what it achieved -->
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">Bytes attempted vs acknowledged</h2>
+        <span class="hint">
+          <span class="legend-key legend-attempted"></span> attempted (incl. FEC + retries)
+          &nbsp;·&nbsp;
+          <span class="legend-key legend-acked"></span> acknowledged (verified receipts)
+        </span>
+      </div>
+      <div class="chart" id="chart-bytes"></div>
+    </section>
+
+    <!-- Delivered bundles over time -->
     <section class="card">
       <div class="card-head">
         <h2 class="card-title">Delivered over time</h2>

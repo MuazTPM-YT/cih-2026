@@ -599,6 +599,13 @@ function setConnected(ok) {
 // Polling
 // =====================================================
 
+// The poll cadence adapts to gateway health: POLL_INTERVAL while connected, doubling
+// on each consecutive failure up to POLL_MAX_INTERVAL, snapping back to normal on the
+// first success — a dark gateway isn't hammered, yet recovery shows within one cycle.
+const POLL_MAX_INTERVAL = 30000; // ms
+let pollDelay = POLL_INTERVAL;
+let pollTimer = null;
+
 async function poll() {
   pollInFlight = true;
   try {
@@ -612,16 +619,22 @@ async function poll() {
     render(transformApi(observations, queue));
     firstLoad = false;
     setConnected(true);
+    pollDelay = POLL_INTERVAL;
   } catch (err) {
-    console.warn("[hospital-ui] poll failed:", err.message);
+    pollDelay = Math.min(pollDelay * 2, POLL_MAX_INTERVAL);
+    console.warn("[hospital-ui] poll failed:", err.message, "— next attempt in", pollDelay, "ms");
     setConnected(false);
     // Keep last good data on screen.
   } finally {
     pollInFlight = false;
+    schedulePoll();
   }
 }
 
-function pollGuard() { if (!pollInFlight) poll(); }
+function schedulePoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(() => { if (!pollInFlight) poll(); }, pollDelay);
+}
 
 // =====================================================
 // Event wiring
@@ -697,8 +710,7 @@ function init() {
   initViewerControls();
   $btnBack.addEventListener("click", closeDetailDrawer);
 
-  poll();
-  setInterval(pollGuard, POLL_INTERVAL);
+  poll(); // self-reschedules with adaptive backoff (see schedulePoll)
   // Keep "Received: X min ago" fresh without disrupting selection.
   setInterval(() => render(cases), 15000);
 }

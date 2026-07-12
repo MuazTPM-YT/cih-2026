@@ -156,6 +156,9 @@ pub async fn deliver(
 async fn send_paced(socket: &UdpSocket, pacer: &mut Pacer, datagrams: &[Vec<u8>]) -> Result<()> {
     for datagram in datagrams {
         pacer.acquire(datagram.len()).await;
+        // Attempted even if the send errors: over UDP a failed send IS an attempt that
+        // the link ate, which is exactly what the efficiency graph should show.
+        crate::metrics::record_attempted(datagram.len());
         if let Err(e) = socket.send(datagram).await {
             tracing::debug!(error = %e, "udp send failed; counting it as loss");
         }
