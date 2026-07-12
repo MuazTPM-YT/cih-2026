@@ -16,3 +16,7 @@ gateway.redb*
 
 # Tooling artifacts
 .serena/
+
+# Local Claude Code settings + atomic-write temp files (never commit)
+.claude/settings.local.json
+.claude/settings.local.json.tmp.*
