@@ -92,24 +92,55 @@ async fn run_serve(cli: &Cli, config: &tgw_core::Config) -> anyhow::Result<()> {
 
 /// Open a pairing window on the public UDP port, then persist the derived session key.
 async fn run_pairing(config: &tgw_core::Config) -> anyhow::Result<()> {
-    let bind = config
+    let bind: std::net::SocketAddr = config
         .net
         .listen_addr
         .parse()
         .context("parse gateway UDP listen address")?;
     let code = gen_code();
-    // Advertise the port-forwarded public address if configured; else the bind address.
-    let public = config
-        .net
-        .public_addr
-        .clone()
-        .unwrap_or_else(|| config.net.listen_addr.clone());
+    // Advertise the port-forwarded public address if configured. Without it, the bind
+    // address is often 0.0.0.0 — undialable — so substitute this machine's LAN IP and
+    // say plainly that the string only works from the same network.
+    let (public, lan_only) = match config.net.public_addr.clone() {
+        Some(addr) => (addr, false),
+        None => {
+            let ip = if bind.ip().is_unspecified() {
+                local_lan_ip().context(
+                    "cannot determine this machine's address: [net].listen_addr is 0.0.0.0 and \
+                     no [net].public_addr is set — set public_addr in the gateway config",
+                )?
+            } else {
+                bind.ip()
+            };
+            (format!("{ip}:{}", bind.port()), true)
+        }
+    };
     println!("\n  Pairing code: {code}");
     println!("  Field runs:   tgw-field pair \"tgw1:{public}:{code}\"\n");
+    if lan_only {
+        println!(
+            "  NOTE: {public} is this machine's local address — that pairing string works\n\
+             from the SAME network only. For a field device on a DIFFERENT network (WAN):\n\
+             port-forward UDP {} on your router to this machine, set\n\
+             [net].public_addr = \"<your-public-ip>:{}\" in config/gateway.toml,\n\
+             and re-run `tgw-gateway pair`.\n",
+            bind.port(),
+            bind.port()
+        );
+    }
     let key = tgw_gateway::pairing::run_pair_responder(bind, &code, Default::default()).await?;
     tgw_gateway::session::save(&tgw_gateway::session::default_path(), &key)?;
     println!("paired ✓  session key stored — now start the gateway (no subcommand) to receive");
     Ok(())
+}
+
+/// Best-effort local LAN address: UDP-connect to a public IP (no packet is sent for a
+/// UDP connect) and read back the source address the kernel would route from.
+fn local_lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    if ip.is_unspecified() { None } else { Some(ip) }
 }
 
 /// Human pairing code: a digit + three short words from a small wordlist (~44 bits of entropy).

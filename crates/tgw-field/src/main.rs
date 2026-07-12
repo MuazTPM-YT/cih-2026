@@ -282,8 +282,17 @@ fn parse_pairing_string(s: &str) -> Result<(String, String)> {
     let (addr, code) = rest
         .rsplit_once(':')
         .context("pairing string missing code")?;
-    if addr.parse::<SocketAddr>().is_err() {
-        bail!("pairing string address {addr:?} is not host:port");
+    let parsed: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("pairing string address {addr:?} is not host:port"))?;
+    // 0.0.0.0 / :: is a bind placeholder, not a dialable host — dialing it hangs forever.
+    // The hospital prints it when [net].public_addr is missing; tell the operator exactly that.
+    if parsed.ip().is_unspecified() {
+        bail!(
+            "pairing address {addr} is not dialable (it is a wildcard bind address). \
+             On the hospital machine, set [net].public_addr in config/gateway.toml to its \
+             real IP (LAN) or port-forwarded public IP (WAN) and re-run `tgw-gateway pair`"
+        );
     }
     if code.is_empty() {
         bail!("pairing string has an empty code");
@@ -943,5 +952,9 @@ mod pairing_string_tests {
             "empty code"
         );
         assert!(parse_pairing_string("tgw1:not-an-addr:code").is_err());
+        assert!(
+            parse_pairing_string("tgw1:0.0.0.0:47000:9-maple-harbor-delta").is_err(),
+            "wildcard bind address is not dialable and must be rejected up front"
+        );
     }
 }

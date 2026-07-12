@@ -12,38 +12,63 @@ use tokio::time::{Instant, timeout};
 /// Retransmit interval for `PAIR_INIT` / `PAIR_CONFIRM` while awaiting a response.
 const RETRANSMIT: Duration = Duration::from_millis(500);
 
+/// How often to tell the operator we are still waiting (so a dead address never looks hung).
+const PROGRESS_EVERY: Duration = Duration::from_secs(5);
+
 /// Pair with the hospital at `hospital_addr` using the human `code`; return the session key.
 pub async fn pair_with_hospital(
     hospital_addr: &str,
     code: &str,
     deadline: Duration,
 ) -> Result<Key> {
+    // Deliberately UNCONNECTED: on multihomed hosts and behind some NATs the hospital's
+    // reply can arrive from a different source IP than the one we dialed, and a
+    // connect()ed UDP socket would silently drop it. Accepting replies from any source
+    // is safe here — authenticity comes from SPAKE2 key confirmation, not the address.
     let sock = UdpSocket::bind("0.0.0.0:0").await.context("pair: bind")?;
-    sock.connect(hospital_addr)
-        .await
-        .with_context(|| format!("pair: connect {hospital_addr}"))?;
+    let target: std::net::SocketAddr = hospital_addr
+        .parse()
+        .with_context(|| format!("pair: bad hospital address {hospital_addr}"))?;
 
     let (initiator, msg_a) = start_initiator(code);
     let mut cookie: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 2048];
-    let end = Instant::now() + deadline;
+    let started = Instant::now();
+    let end = started + deadline;
+    let mut next_progress = started + PROGRESS_EVERY;
 
     // Phase 1: send INIT (with whatever cookie we have) until we get a full RESP.
     let (session, responder_confirm) = loop {
-        if Instant::now() >= end {
-            bail!("pairing timed out — check the code and that the hospital port is reachable");
+        let now = Instant::now();
+        if now >= end {
+            bail!(
+                "pairing timed out after {}s with no response from {hospital_addr} — check that \
+                 the hospital's pairing window is open (`tgw-gateway pair`), the address/port \
+                 are reachable from this network, and UDP {port} is forwarded for WAN use",
+                deadline.as_secs(),
+                port = hospital_addr.rsplit(':').next().unwrap_or("?"),
+            );
+        }
+        // Silence is indistinguishable from "stuck" to an operator — report progress.
+        if now >= next_progress {
+            eprintln!(
+                "  still trying {hospital_addr} … no response yet ({}s of {}s)",
+                started.elapsed().as_secs(),
+                deadline.as_secs()
+            );
+            next_progress = now + PROGRESS_EVERY;
         }
         let init = PairFrame::Init {
             cookie: cookie.clone(),
             msg: msg_a.clone(),
         };
-        sock.send(&encode_pair(&init))
+        sock.send_to(&encode_pair(&init), target)
             .await
             .context("pair: send init")?;
 
-        match timeout(RETRANSMIT, sock.recv(&mut buf)).await {
+        match timeout(RETRANSMIT, sock.recv_from(&mut buf)).await {
             Err(_) => continue, // silence → retransmit
-            Ok(Ok(n)) => match decode_pair(&buf[..n]) {
+            Ok(Ok((n, _from))) => match decode_pair(&buf[..n]) {
                 Some(PairFrame::Resp {
                     cookie: c,
                     msg: msg_b,
@@ -78,10 +103,12 @@ pub async fn pair_with_hospital(
     };
     let encoded = encode_pair(&confirm);
     loop {
-        sock.send(&encoded).await.context("pair: send confirm")?;
-        match timeout(RETRANSMIT, sock.recv(&mut buf)).await {
+        sock.send_to(&encoded, target)
+            .await
+            .context("pair: send confirm")?;
+        match timeout(RETRANSMIT, sock.recv_from(&mut buf)).await {
             Err(_) => break, // no more RESP retries arriving → the hospital accepted
-            Ok(Ok(n)) => match decode_pair(&buf[..n]) {
+            Ok(Ok((n, _from))) => match decode_pair(&buf[..n]) {
                 Some(PairFrame::Resp { .. }) => {} // hospital retried; re-send confirm
                 _ => break,
             },
